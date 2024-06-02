@@ -1,0 +1,176 @@
+---
+layout: post
+title:  "Open source in the software supply chain"
+date:   2024-05-26 20:30:00 PDT
+categories: jekyll update
+---
+I work at Google Cloud in Confidential Computing, and I do a lot of work trying to make strong integrity guarantees that Google is certainly not trying to steal your data.
+I also enable Google Cloud users to make similar guarantees of their own offerings on top.
+Data theft is a topic hotly debated since the creation of the internet.
+I want to be clear that I'm not advocating for spyware or "defective by design" software applications on personal computers as a means of implementing Digital Rights Management (DRM).
+DRM is a technology meant to prevent piracy.
+The technology I'm enabling might still be used to limit folks' access to their own machines, but its primary purpose from my side of things is to protect users from advanced persistent threats that have the means to attack hypervisors and highly-privileged internal operators.
+I won't have a say in all its applications.
+
+Good security provides a safe way to say "yes" to access while also saying "no" to unsafe access.
+When "computer says no" becomes a tool of oppression rather than as an overridable checkpoint to re-evaluate if the action should really be taken, then that's a pungent smell.
+
+Like with most security endeavors, the amount you're willing to invest in protections should be less than the value of what you're trying to protect.
+The road to "yes" for one user may be shorter than the road to "yes" for another, because maybe one doesn't think the detour around the active volcano is necessary, or would take too much time and fuel.
+
+## Time and fuel cost money
+
+When you're dealing with an advanced persistent threat, and you're creating a foundational technology for many multi-billion-dollar businesses, the amount you invest in your foundation will be more than what a non-profit can invest.
+But, even gigacorps (teracorps?) like Microsoft, Google, and IBM use and contribute to open source projects from smaller organizations, but still not with enough care and attention that is needed to prevent security bugs.
+Projects that are community-owned and community-driven need to have their own self-determination for security practices and governance, so I think it's inappropriate for huge corporations to strong-arm their way into maintainer status to drive their interests.
+Maintainer status must be earned from community through a strong track record of contributions and technical leadership, [Jia Tan](https://www.wired.com/story/jia-tan-xz-backdoor/) of the XZ project being a scary exception (though arguably the "community voices" were puppet accounts and not other trusted contributors).
+We should expect to see more corporate-sponsored foundations that create free educational resources and tools.
+
+### Following the open source money
+
+The investment problem crossed with self-determination has lead to cross-industry initiatives that seek to improve the security floor of open source projects without the need for expensive expertise or proprietary tools.
+The [Linux Foundation](https://linuxfoundation.org) is the ultimate supporter of many such initiatives, like the [Open Source Security Foundation](https://openssf.org), the [Cloud Native Computing Foundation](https://cncf.io), [in-toto](https://in-toto.io), [SLSA](https://slsa.dev), [Sigstore](https://sigstore.dev), and the [Confidential Computing Consortium](https://confidentialcomputing.io).
+[SUSE S.A.](https://suse.com) is a separate legal entity that ([among others](https://en.opensuse.org/Sponsors)) contributes to the [openSUSE organization](https://opensuse.org) which has created the [Open Build Service](https://openbuildservice.org) under the GPL as an effort to help secure the open source software supply chain.
+The [Open Computing Project](https://opencompute.org) is a separate foundation first started by Facebook.
+The [Trusted Computing Group](https://trustedcomputinggroup.org) is its own organization that many members of the prior foundations are also members of.
+The [Internet Engineering Task Force](https://ietf.org) is a long-standing organization for developing standards for open technologies for use on the internet, and has many security-related initiatives.
+
+We don't see nearly enough software development grant opportunities to support technical infrastructure maintainers, or foundation-supported assistance for incubating open source projects to get diverse funding sources.
+Software developers are not inherently good at starting up their own self-proprietorship or 501(c)(3) and fundraising.
+Conversely, enterprises need strong incentives to provide financial assistance to projects that they import as dependencies.
+Enterprises don't want to get sued for violating licensing agreements, so they'll go after permissive licenses.
+
+### "AS IS"
+
+> Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an “AS IS” BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+
+These words protects an open source software developer that makes mistakes from legal damages.
+They don't protect that developer from criminal charges when they intentionally introduce security problems to attack a downstream user ("unless required by law").
+It still takes a learned skill to put of boundaries against vitriolic feedback or entitled demands for feature development.
+If you assign a permissive software license to your own project, I highly recommend also learning the Goodfellas' (and Mike Monteiro's) ["fuck you, pay me"](https://www.youtube.com/watch?v=jVkLVRt6c1U) mentality.
+
+The investment in the engineering team that owns the task of backporting patches and maybe contributing a few upstream patches is often not enough.
+I don't think we have a good decision tree for an investment strategy though.
+Ultimately, software maintainers must be trusted to write secure software, or unrealistically, the engineer who decided to add the dependency must be trusted to do a comprehensive security review before shipping the new dependency.
+
+### Permissive licenses by themselves are unsustainable
+
+I don't think open source software is dead, but I do think permissive licenses kill projects that aren't managed by folks with a penchant for fundraising.
+There are too many enterprises and governments that depend on open source projects to give up on open source, and shared infrastructure is what?
+That's right, public infrastructure.
+How is public infrastructure paid for?
+That's right, taxes.
+How is the public interest protected when that money is given out?
+That's right, support contracts with penalties for malfeasance.
+That contract is with a particular body that has its own quality metrics for determining if the software is behaving as expected.
+
+Have we just reinvented the enterprise Linux business model?
+The foundation that pays the developer might just hire the developer to be done with it.
+The developer might create a legal entity for the software business to protect themself from legal penalties.
+It might make sense to provide software for free for smaller entities, but require support contracts for larger installations.
+We're now in the enshittification era, where the paywalls go up at arbitrary times.
+I'd link to the article "Enshittification is coming for absolutely everything", but it's behind a paywall.
+
+When your project goes from fun to successful infrastructure that needs constant support, what then?
+Do you pull a HashiCorp or Redis and throw a new license on that requires pay to play and then get forked anyway?
+Do you want to maintain the project for free?
+Do you want maintenance of the project to be your job/business venture?
+Do you want to give the maintainer keys over to someone else?
+How do you protect your legacy then, if you care?
+
+If there's a big enough demand from a large enough community, I could see the project get forked under a software foundation like Valkey and OpenTofu have under the Linux Foundation.
+If there's not enough demand, then maybe the project just has run its course.
+Self sacrifice for open source is analogous to the tortured artist stereotype.
+I don't see a lot of business-minded artists though.
+We need safer defaults for how to support open source projects to prevent abuse, but I don't think we have a good framework for that yet.
+
+What we can do is monitor problems over the open source ecosystem and bubble up reports of bad dependencies to the dependent projects.
+This is the topic of software supply chain security.
+The latency between report and mitigation in the deployed system is also a cause for concern, but is the topic of release engineering and not supply chain integrity.
+The human element is left as an exercise for the reader, because of course we're going to try to solve the technical problem technically and leave the sustainability problem to later.
+
+## Security
+
+Let's say you want to use an open source project but don't know if it's safe to do so.
+The [Open Source Security Scorecard](https://github.com/ossf/scorecard) is a very interesting set of metrics to apply.
+The OpenSSF best practices badge encompasses some measurable and some good faith reporting on specific criteria at different levels, e.g., [bronze best practices](https://www.bestpractices.dev/en/criteria/0), [gold best practices](https://www.bestpractices.dev/en/criteria/2).
+One metric might be whether it has a coordinated vulnerability disclosure policy.
+Another is a track record for response times and transparency reporting post-mitigation.
+
+One metric might be popularity, but that's not an indicator of whether the dependency is sustainable.
+One metric might be whether it's supported by a reputable foundation with reputable funding sources, but that can be hard to determine without keen knowledge.
+
+There is certainly a lot of process that a project might need to go through in order to meet these criteria, which is why GitHub is working to make better security practices the default.
+
+Good security practices that GitHub has or will enable by default are
+
+*  [dependabot](https://github.com/dependabot) automated pull requests for updating or downgrading dependencies that have reported vulnerabilities and also non-vulnerable versions.
+*  [SLSA build attestations](https://docs.github.com/en/actions/security-guides/using-artifact-attestations-to-establish-provenance-for-builds) for tracking source integrity through to the built binary artifacts.
+
+A non-default but low-effort action is to [apply recommended security defaults](https://docs.github.com/en/code-security/securing-your-organization/enabling-security-features-in-your-organization/applying-the-github-recommended-security-configuration-in-your-organization).
+
+The OpenSSF scorecard will encourage branch protection to require code review by other maintainers.
+A difficult policy to agree on enforcing is to require all commits are cryptographically signed by their authors.
+This is difficult since key management is particularly tricky to get right without financial support (hardened keyfobs are expensive, and good safes to store them are expensive) and coordinated efforts around key access policy.
+My conversations with a veteran Debian maintainer suggests that key anxiety is quite real and can keep you up at night ("where did I put my yubikey?!").
+
+## Software and binary artifact integrity
+
+Software supply chain security in tech articles is almost always talking about integrity and not the confidentiality or availability of software.
+Software supply chain integrity (SSCI) in the abstract is a term for being able to account for and build trust in all the links of your software supply chain.
+A link in your software supply chain can be, for example
+
+*   a code change by role/person X (including the import of an entire third party dependency) over channel C_X.
+*   a build from commit X by builder Y stores its output artifacts in location Z by means of channel C_Y.
+*   a test suite from commit X_t run on Z passes, and the attestation of the passing test is stored in location Z2_t by means of channel C_t.
+
+A build may not be deterministic, as in, all the inputs to the build might be different from one run to another due to non-locked dependencies that get downloaded at build time.
+The build may also just not be deterministic because the compiler produces different bits between runs in a manner that is supposedly semantics-preserving.
+Test suites may not be deterministic if they download non-locked packages to run during their execution.
+Channels of communication may not be secured, though they should be.
+Furthermore, one person's run time is another person's compile time. You'll need to account for the integrity of binaries you run by verifying their build integrity ahead of time.
+
+There are a few different technologies that have been proposed to account for SSCI that serve different purposes:
+
+*   Software bill of materials (SBOM) as implemented by CycloneDX, SPDX, or CPE: a bill of material gives a best-effort account for all software components are in a system, and at which versions. The account itself may be signed for integrity, but its contents cannot be easily checked for veracity beyond that. There simply is not enough detail. An SBOM is meant to be a useful summary to cross-reference with vulnerability databases to determine risk exposure.
+*   Build attestations as implemented by [in-toto](https://in-toto.io), NotaryV2, SCITT, etc. A build attestation is an integrity-protected account of all steps of artifact construction as signed by the roles that performed them. They can have varying levels of integrity protection, going all the way to all input bits accounting exactly for all output bits. The build is not required to be deterministic, since that's very hard to achieve and kind of defeats the purpose for accounting for integrity in the first place.
+
+Whereas in-toto with a [SLSA](https://slsa.dev) provenance predicate may be able to say what commit a binary artifact is built at, an SBOM of the same artifact may give a breakdown of third party dependencies the repository at that commit uses, possibly with integrity protection through a committed lock file (Cargo.lock, go.sum, etc.). The two are complementary. The SLSA "levels" should be interpreted as organizational attestations to operational security practices. Whereas integrity is accounting, the computational context in which that accounting is done must also be secured with a reasonable set of best practices.
+
+## Open source security foundation (OpenSSF)
+
+The OpenSSF supports multiple projects that seek to improve the security posture of all open source projects. A grand vision for sure.
+The SLSA levels for operational security can be difficult to achieve, especially when you depend on third party software.
+The OpenSSF has created the "score card" for how well a project is doing at maintaining its software.
+The score card is a program you can run on GitHub projects with an API token, and it's fascinating.
+
+The OpenSSF score card and SLSA security levels for build attestation try to get at holistic operational security practices around the entire software development lifecycle.
+For example, to submit a change to a repository, you may need to have at least the following policies in place:
+
+1.  people write software by first getting the source code. They first get access only if they're on an approved device, they can prove their identity, and their identity has authorization to the code.
+2.  the network security protocol may provide the overall network access for the approved device. We need an approved device to ensure a ground truth of what starting software is on the machine to avoid leaking intellectual property through malicious code.
+3.  the change to the code is sent for review before submission. There may be many pre-submit checks that could be blocking or just a notice. The changes must be approved by roles that have the authorization to approve changes to each individual file.
+4.  post-approval change policy gets applied: is there a file that needs every changed character approved, or are fixups fine? Even so, keep an audit log of post-approval changes and send them to reviewers after submission.
+
+This already presupposes a fair amount of infrastructure that smaller organizations will not be likely to have. The OpenSSF score card could be a target for software development platforms to make easily applicable, but it can be a big hurdle.
+If you're 
+
+5.  the changes to version control are only allowed from machines on the corporate network.
+3.  a binary release can only be initiated by preauthorized automation or by an authorized role
+4.  the release's builder role is granted read access to the version control system.
+5.  the builder role is only granted acces
+3.  software from version control is checked ou
+
+All integrity guarantees are likely to be provided by cryptographic signing of some form.
+Cryptographic signing isn't magic, but it can be a tool of oppression.
+If your operating system does not allow running unsigned applications by default, that's good. That protects you from unauthorized malware from starting surreptitiously.
+If the OS doesn't allow you to extend which application signers are trusted, that's bad.
+You should be allowed to own your machine to the point of re-establishing a chain of trust in applications you build yourself, Gentoo-style.
+
+Whan I say, "you own your machine", 
+
+When you run a service on your own computer that serves an important function and should protect private data entrusted to it, you need security.
+
+Napster was the first big story I remember.
+Then Limewire, Kazaa, Morpheus, DirectConnect, and finally Bittorrent and its big hubs like the pirate bay.
+This is clea
