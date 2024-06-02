@@ -1,9 +1,0 @@
-github_users:
-  - deeglaze
-
-github_repos:
-  - deeglaze/scribble-latex-utils
-  - deeglaze/slideshow-helpers
-  - google/go-configfs-tsm
-  - google/go-sev-guest
-  - google/go-tpm-tools
