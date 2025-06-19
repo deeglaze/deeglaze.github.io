@@ -55,17 +55,6 @@ ninja.data = [{
             window.location.href = "/blog/2025/Transparency-has-value/";
           
         },
-      },{id: "post-a-post-with-plotly-js",
-        
-          title: "a post with plotly.js",
-        
-        description: "this is what included plotly.js code could look like",
-        section: "Posts",
-        handler: () => {
-          
-            window.location.href = "/blog/2025/plotly/";
-          
-        },
       },{id: "post-move-fast-make-shit",
         
           title: "Move fast, make shit",
@@ -75,17 +64,6 @@ ninja.data = [{
         handler: () => {
           
             window.location.href = "/blog/2025/Standards/";
-          
-        },
-      },{id: "post-a-post-with-image-galleries",
-        
-          title: "a post with image galleries",
-        
-        description: "this is what included image galleries could look like",
-        section: "Posts",
-        handler: () => {
-          
-            window.location.href = "/blog/2024/photo-gallery/";
           
         },
       },{id: "post-mentoring-a-swe-part-0",
