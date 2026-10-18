@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CTLV family specifications</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="layout">
+<nav class="side">
+  <a class="brand" href="index.html">CTLV specs</a>
+  <div class="switch">
+    <a href="guide.html">Guide</a>
+    <a href="reference.html">Reference</a>
+    <a href="netlink.html">Netlink</a>
+  </div>
+</nav>
+<main>
+<h1>CTLV family specifications</h1>
+<p class="lead">CTLV is a transport for device control interfaces. A <em>family</em> describes what its devices accept and return in a YAML file; a generator turns that file into kernel metadata and UAPI headers, and the kernel validates every message against it before driver code runs.
+Derived from patch series <a href="https://lore.kernel.org/all/20261015145053.3664509-1-jiri@resnulli.us/">attestation: Add a common subsystem and TDX support</a>.</p>
+
+<div class="cards">
+  <a class="card" href="guide.html">
+    <h2>Guide</h2>
+    <p>A gentle walk from a thirty-line real specification to writing, extending and evolving your own family.</p>
+  </a>
+  <a class="card" href="reference.html">
+    <h2>Reference</h2>
+    <p>Complete technical definition of the language: every key, rule, limit, identifier and compatibility check.</p>
+  </a>
+</div>
+<p>Already know the Netlink YAML specs? <a href="netlink.html">See how CTLV compares and contrasts</a>, with the same interface written both ways.</p>
+
+<h2>Scope</h2>
+<p>These pages cover the YAML specification language and the tooling around it: the family specification, the family registry, the output manifest, ABI snapshots, and the <code>tools/ctlv</code> generator. They do not cover the wire format or the character-device interface (see <code>Documentation/userspace-api/ctlv.rst</code>), nor the kernel callbacks a family implements (see <code>Documentation/driver-api/ctlv.rst</code>).</p>
+
+<h2>Source files</h2>
+<table>
+<tr><th>Path</th><th>Contents</th></tr>
+<tr><td><code>Documentation/ctlv/ctlv-schema.yaml</code></td><td>Meta-schema for a family specification</td></tr>
+<tr><td><code>Documentation/ctlv/specs/</code></td><td>One specification per family</td></tr>
+<tr><td><code>Documentation/ctlv/families.yaml</code></td><td>Family registry</td></tr>
+<tr><td><code>Documentation/ctlv/generated-files.yaml</code></td><td>Output manifest</td></tr>
+<tr><td><code>Documentation/ctlv/abi/</code></td><td>ABI snapshots</td></tr>
+<tr><td><code>tools/ctlv/</code></td><td>Validator, generator and ABI checker</td></tr>
+</table>
+</main>
+</div>
+</body>
+</html>

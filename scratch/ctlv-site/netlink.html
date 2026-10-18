@@ -1,0 +1,344 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CTLV and Netlink YAML — CTLV family specifications</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="layout">
+<nav class="side">
+  <a class="brand" href="index.html">CTLV specs</a>
+  <div class="switch">
+    <a href="guide.html">Guide</a>
+    <a href="reference.html">Reference</a>
+    <a class="here" href="netlink.html">Netlink</a>
+  </div>
+  <ol>
+    <li><a href="#shared">Common ground</a></li>
+    <li><a href="#example">Same interface, two specs</a></li>
+    <li><a href="#overview">At a glance</a></li>
+    <li><a href="#identity">Identity and structure</a></li>
+    <li><a href="#attrs">Attributes</a></li>
+    <li><a href="#types">Type mapping</a></li>
+    <li><a href="#checks">Validation constraints</a></li>
+    <li><a href="#ops">Operations</a></li>
+    <li><a href="#events">Events and notifications</a></li>
+    <li><a href="#evolution">Evolution and tooling</a></li>
+    <li><a href="#keymap">Key-by-key map</a></li>
+    <li><a href="#choosing">Reading across</a></li>
+  </ol>
+</nav>
+<main>
+<h1>CTLV compared with the Netlink YAML specs</h1>
+<p class="lead">The kernel already describes Netlink protocols in YAML (<code>Documentation/netlink/specs/</code>, schemas in <code>Documentation/netlink/</code>). CTLV specs look similar on purpose, and differ in ways that follow from CTLV being a character-device transport. This page lines them up. "Netlink" below means the modern <code>genetlink</code> schema, <code>Documentation/netlink/genetlink.yaml</code>; the older <code>genetlink-c</code>, <code>genetlink-legacy</code> and <code>netlink-raw</code> levels add keys on top of it and are mentioned only where they matter.</p>
+
+<h2 id="shared">Common ground</h2>
+<p>If you know Netlink specs, these will feel familiar.</p>
+<ul>
+  <li>A YAML file is the complete description of an interface. A generator produces the UAPI header and kernel-side tables from it, and the kernel validates incoming messages against what the spec declares.</li>
+  <li>Messages are trees of typed attributes, with nesting, repetition, integers, strings and binary data.</li>
+  <li>Attributes are declared in named collections and referenced by name from operations.</li>
+  <li>Enums and flags are declared once and attached to integer attributes.</li>
+  <li>Operations come in request/reply, multi-part (dump or query) and unsolicited (notification or event) flavours.</li>
+  <li>Names are kebab-case and become upper-case C identifiers.</li>
+  <li>Both are validated by a JSON Schema (draft 7) in the tree, with the same <code>%YAML 1.2</code> header and SPDX first line, and both use the licence expression <code>((GPL-2.0 WITH Linux-syscall-note) OR BSD-3-Clause)</code> in-tree.</li>
+</ul>
+
+<h2 id="example">Same interface, two specs</h2>
+<p>The Netlink <code>handshake</code> family (<code>Documentation/netlink/specs/handshake.yaml</code>) lets a TLS handler daemon accept a pending handshake request. Here is its <code>accept</code> command, abridged, and a CTLV spec for an equivalent invented interface.</p>
+
+<h3>Netlink</h3>
+<pre data-title="handshake.yaml (abridged)"><code>name: handshake
+protocol: genetlink
+doc: Netlink protocol to request a transport layer security handshake.
+
+definitions:
+  -
+    type: enum
+    name: handler-class
+    value-start: 0
+    entries: [none, tlshd, max]
+  -
+    type: enum
+    name: auth
+    value-start: 0
+    entries: [unspec, unauth, psk, x509]
+
+attribute-sets:
+  -
+    name: x509
+    attributes:
+      - { name: cert,    type: s32 }
+      - { name: privkey, type: s32 }
+  -
+    name: accept
+    attributes:
+      - { name: sockfd,        type: s32 }
+      - { name: handler-class, type: u32, enum: handler-class }
+      - { name: timeout,       type: u32 }
+      - { name: auth-mode,     type: u32, enum: auth }
+      - { name: peer-identity, type: u32, multi-attr: true }
+      - { name: certificate,   type: nest, nested-attributes: x509,
+          multi-attr: true }
+  -
+    name: done
+    attributes:
+      - name: status
+        type: u32
+        checks: { max: max-errno }
+
+operations:
+  list:
+    -
+      name: accept
+      doc: Handler retrieves next queued handshake request
+      attribute-set: accept
+      flags: [admin-perm]
+      do:
+        request:
+          attributes: [handler-class]
+        reply:
+          attributes: [sockfd, timeout, auth-mode,
+                       peer-identity, certificate]</code></pre>
+
+<h3>CTLV</h3>
+<pre data-title="ctlv-handshake.yaml (invented)"><code>family:
+  name: ctlv-handshake
+  inherits: ctlv
+
+enums:
+  - name: handler-class
+    values: [ tlshd ]
+  - name: auth
+    values: [ unauth, psk, x509 ]
+
+attr-groups:
+  - name: handshake
+    attrs:
+      - name: sockfd
+        type: sint
+      - name: handler-class
+        enum: handler-class
+      - name: timeout
+        type: uint
+      - name: auth-mode
+        enum: auth
+      - name: peer-identity
+        type: uint
+        max-occurrences: 8
+      - name: certificate
+        attrs: x509
+        max-occurrences: 4
+      - name: cert
+        type: sint
+      - name: privkey
+        type: sint
+      - name: status
+        type: uint
+        max: 4095
+
+attr-sets:
+  - name: x509
+    attrs: [ handshake.cert, handshake.privkey ]
+  - name: accept-request
+    attrs: handshake.handler-class
+  - name: accept-reply
+    attrs: [ handshake.sockfd, handshake.timeout, handshake.auth-mode ]
+    optional-attrs: [ handshake.peer-identity, handshake.certificate ]
+
+ops:
+  - name: accept
+    type: action
+    request:
+      attrs: accept-request
+    reply:
+      attrs: accept-reply</code></pre>
+<p>The CTLV spec passes the CTLV validator once registered. Points worth noticing:</p>
+<ul>
+  <li>Netlink puts the attribute list for a message on the operation (<code>request.attributes</code>); CTLV names an <em>attr set</em> and lets the set decide which attributes are required and which are optional.</li>
+  <li>Netlink's <code>multi-attr: true</code> says "may repeat" with no bound. CTLV's <code>max-occurrences</code> states the bound, and the bound feeds the generated message-length limit.</li>
+  <li>The Netlink spec requires <code>doc</code> strings; CTLV specs carry comments instead.</li>
+  <li>Netlink's <code>admin-perm</code> is a capability check. CTLV has no counterpart; access is decided by how the device node was opened (<code>fd-access</code>) and by the node's permissions.</li>
+  <li>Netlink's enums begin at 0 unless told otherwise, and carry <code>unspec</code> entries by convention. CTLV enums always begin at 1 with 0 reserved, so no placeholder is needed.</li>
+  <li>The 8-bit, 16-bit and 32-bit choices disappear: <code>u32</code> and <code>s32</code> both become 64-bit <code>uint</code> and <code>sint</code>, narrowed with <code>min</code>/<code>max</code> where needed.</li>
+</ul>
+
+<h2 id="overview">At a glance</h2>
+<table>
+<tr><th></th><th>Netlink YAML</th><th>CTLV YAML</th></tr>
+<tr><td>Transport</td><td>Netlink sockets</td><td>Character device per instance, one ioctl, <code>read()</code> for events</td></tr>
+<tr><td>Interface identity</td><td>Family name; numeric ID allocated at runtime</td><td>Family name plus a fixed numeric ID from an append-only registry</td></tr>
+<tr><td>Reuse across interfaces</td><td>Attribute sets, <code>subset-of</code>; no inheritance between families</td><td>Single inheritance between families; stubs as extension points</td></tr>
+<tr><td>Required vs optional attributes</td><td>Not expressed in the spec</td><td>Expressed per placement (<code>attrs</code> / <code>optional-attrs</code>) and enforced</td></tr>
+<tr><td>Integer widths</td><td>8, 16, 32, 64 bit, signed and unsigned, byte order selectable</td><td>Always 64 bit</td></tr>
+<tr><td>Numbering</td><td>Sequential, overridable with <code>value</code></td><td>Strictly by position; no override</td></tr>
+<tr><td>Max message length</td><td>Not computed</td><td>Computed and bounded at generation time</td></tr>
+<tr><td>Compatibility checking</td><td>No snapshot mechanism in the schemas</td><td>Checked-in ABI snapshots, checked by the tool</td></tr>
+<tr><td>Schema variants</td><td>Four levels (<code>genetlink</code>, <code>-c</code>, <code>-legacy</code>, <code>netlink-raw</code>)</td><td>One</td></tr>
+<tr><td>Unsolicited messages</td><td>Multicast groups</td><td>Per-file-description subscriptions and a bounded queue</td></tr>
+</table>
+
+<h2 id="identity">Identity and structure</h2>
+<table>
+<tr><th>Topic</th><th>Netlink</th><th>CTLV</th></tr>
+<tr><td>Top-level keys</td><td><code>name</code>, <code>doc</code>, <code>protocol</code>, <code>uapi-header</code>, <code>definitions</code>, <code>attribute-sets</code>, <code>operations</code>, <code>mcast-groups</code>, <code>kernel-family</code></td><td><code>family</code>, <code>enums</code>, <code>flags</code>, <code>attr-groups</code>, <code>attr-sets</code>, <code>ops</code></td></tr>
+<tr><td>Required keys</td><td><code>name</code>, <code>doc</code>, <code>attribute-sets</code>, <code>operations</code></td><td><code>family</code> only</td></tr>
+<tr><td>Family ID</td><td>Allocated dynamically; the name identifies the family</td><td>Index in <code>families.yaml</code>; part of every attr and op ID</td></tr>
+<tr><td>File name</td><td>Free</td><td>Must equal the family name</td></tr>
+<tr><td>Inheritance</td><td>None. A spec is complete and independent of other specs</td><td>One parent. A child name is <code>parent-suffix</code>. The root family <code>ctlv</code> supplies discovery, introspection and event operations to every family</td></tr>
+<tr><td>Partial reuse</td><td><code>subset-of</code> declares a restricted view of another attribute set in the same spec</td><td>Selectors pick any mix of single attrs, whole groups and other sets</td></tr>
+<tr><td>Extension by others</td><td>Not supported by the language</td><td>A parent leaves a <code>stub</code> set; one descendant fills it</td></tr>
+<tr><td>Constants</td><td><code>definitions</code> may declare <code>const</code> (and <code>struct</code> in the legacy level), and may point at an existing C header</td><td>Enums and flags only; no constants, no external headers</td></tr>
+<tr><td>Naming control</td><td><code>name-prefix</code>, <code>enum-name</code>, <code>async-prefix</code>, <code>uapi-header</code></td><td>None; C names are derived from the YAML names, and a collision is an error</td></tr>
+<tr><td>YAML dialect</td><td>Standard YAML validated by the schema</td><td>Strict subset: no anchors, aliases, merge keys, explicit tags or duplicate keys</td></tr>
+</table>
+
+<h2 id="attrs">Attributes</h2>
+<h3>Declaring and using</h3>
+<p>Both languages separate declaring an attribute from deciding where it appears, but at different granularity.</p>
+<table>
+<tr><th></th><th>Netlink</th><th>CTLV</th></tr>
+<tr><td>Container</td><td><code>attribute-sets</code>: a named space of attributes</td><td><code>attr-groups</code>: a named namespace of attributes (declaration)</td></tr>
+<tr><td>Message level</td><td>An operation names one <code>attribute-set</code>; its request and reply list attribute names from that set</td><td>An <code>attr-set</code> lists selectors; an operation names a set (or selectors) for its request and for its reply</td></tr>
+<tr><td>Nesting</td><td><code>type: nest</code> with <code>nested-attributes</code> naming another set</td><td>A nest attr with <code>attrs</code> (and <code>optional-attrs</code>) selectors</td></tr>
+<tr><td>Attributes from different spaces in one message</td><td>Not within one operation, which names one set</td><td>Yes; a set can select from any groups</td></tr>
+<tr><td>Recursion</td><td>No dedicated keyword</td><td>Explicit <code>recursive: true</code>, query replies only</td></tr>
+<tr><td>Required attribute</td><td>No such concept in the spec</td><td>Listed under <code>attrs</code>; absence is a validation error naming the attribute</td></tr>
+<tr><td>Repetition</td><td><code>multi-attr: true</code>; unbounded</td><td><code>max-occurrences: N</code> or <code>unlimited</code> (query replies only); repeated occurrences must be adjacent in a request</td></tr>
+<tr><td>Arrays</td><td><code>indexed-array</code>, <code>sub-type</code></td><td>Repeat the attribute</td></tr>
+<tr><td>Documentation</td><td><code>doc</code> on nearly everything, required on the family and each operation</td><td>YAML comments</td></tr>
+</table>
+
+<h3>Numbering</h3>
+<table>
+<tr><th></th><th>Netlink</th><th>CTLV</th></tr>
+<tr><td>Attribute number</td><td>Position within the set, overridable with <code>value</code>; the number is local to the attribute set</td><td>Position within the group; globally unique 64-bit ID combining family, group and attribute</td></tr>
+<tr><td>Operation number</td><td>Position, overridable with <code>value</code></td><td>Position; globally unique ID combining family and operation</td></tr>
+<tr><td>Enum start</td><td><code>value-start</code>, default 0</td><td>Always 1</td></tr>
+<tr><td>Flag bits</td><td>From the starting bit given by <code>value-start</code></td><td>From bit 0, at most 64</td></tr>
+<tr><td>Reserved slots</td><td><code>unused</code> and <code>pad</code> attribute types</td><td>None</td></tr>
+</table>
+<p>CTLV's absence of <code>value</code> overrides means a CTLV spec file is its own numbering: moving or deleting a declaration changes IDs, which the ABI check reports.</p>
+
+<h2 id="types">Type mapping</h2>
+<table>
+<tr><th>Netlink</th><th>CTLV</th><th>Notes</th></tr>
+<tr><td><code>u8</code>, <code>u16</code>, <code>u32</code>, <code>u64</code></td><td><code>uint</code></td><td>CTLV is 64-bit on the wire; use <code>max</code> to state the real range.</td></tr>
+<tr><td><code>s8</code> … <code>s64</code></td><td><code>sint</code></td><td>Same.</td></tr>
+<tr><td><code>uint</code>, <code>sint</code></td><td><code>uint</code>, <code>sint</code></td><td>Netlink's variable-width forms; CTLV's are fixed 64-bit.</td></tr>
+<tr><td><code>flag</code> (presence means true)</td><td><code>bool</code> (one byte, 0 or 1)</td><td>A CTLV bool is always carried with a value.</td></tr>
+<tr><td><code>string</code></td><td><code>string</code></td><td>CTLV requires <code>max-length</code>.</td></tr>
+<tr><td><code>binary</code></td><td><code>binary</code></td><td>CTLV requires <code>length</code> or <code>max-length</code>.</td></tr>
+<tr><td><code>nest</code></td><td>attr with <code>attrs</code></td><td></td></tr>
+<tr><td><code>type: u32</code> + <code>enum: name</code></td><td><code>enum: name</code></td><td>Enum is a primary form in CTLV; there is no separate integer width.</td></tr>
+<tr><td><code>enum-as-flags</code>, or an enum of flags type</td><td><code>flags: name</code></td><td>Flags are their own definition kind in CTLV.</td></tr>
+<tr><td><code>byte-order</code></td><td>none</td><td>CTLV integers are not byte-order selectable.</td></tr>
+<tr><td><code>display-hint</code></td><td>none</td><td>CTLV has <code>unit</code> and <code>scale</code> for integers instead.</td></tr>
+<tr><td><code>indexed-array</code>, <code>nest-type-value</code></td><td>none</td><td></td></tr>
+<tr><td><code>unused</code>, <code>pad</code></td><td>none</td><td>CTLV pads implicitly to 8 bytes.</td></tr>
+<tr><td>none</td><td><code>blob</code></td><td>Describes a buffer in caller memory (direction, backing, maximum length, alignment). Netlink conveys such things as plain integers.</td></tr>
+<tr><td>none</td><td><code>unit</code> (<code>seconds</code>, <code>hertz</code>, <code>bytes</code>, <code>celsius</code>), <code>scale</code></td><td>Machine-readable meaning of an integer.</td></tr>
+</table>
+
+<h2 id="checks">Validation constraints</h2>
+<table>
+<tr><th>Netlink <code>checks</code></th><th>CTLV</th></tr>
+<tr><td><code>min</code>, <code>max</code> (integer, constant name, or limit such as <code>u8-max</code>)</td><td><code>min</code>, <code>max</code> on the attribute; integer literals only</td></tr>
+<tr><td><code>min-len</code>, <code>max-len</code>, <code>exact-len</code> (integer or defined constant)</td><td><code>min-length</code>, <code>max-length</code>, <code>length</code> on the attribute; integer literals only</td></tr>
+<tr><td><code>flags-mask</code> (names a flags constant)</td><td>Implied by <code>flags: name</code></td></tr>
+<tr><td>Kernel policy generated from the spec</td><td>Kernel schema generated from the spec</td></tr>
+<tr><td><code>dont-validate: [strict, dump, dump-strict]</code></td><td>None; validation is not switchable per operation</td></tr>
+<tr><td>Unknown attributes tolerated in non-strict mode</td><td>Rejected, unless the sender set <code>CTLV_ATTR_F_IGNORE_IF_UNKNOWN</code> on the attribute</td></tr>
+<tr><td>No ordering rule between repeated attributes</td><td>Occurrences of one attribute must be contiguous</td></tr>
+<tr><td>Message size left to the handler</td><td>Maximum request, reply and event sizes are computed by the generator and checked against 1&nbsp;MiB limits</td></tr>
+<tr><td>Errors reported through extended ACK</td><td>Errors reported in the reply buffer with a reason, message and offsets (<code>error</code> group of the root family)</td></tr>
+</table>
+
+<h2 id="ops">Operations</h2>
+<table>
+<tr><th>Topic</th><th>Netlink</th><th>CTLV</th></tr>
+<tr><td>Operation kinds</td><td>One command may offer <code>do</code>, <code>dump</code>, or both, and be tied to a notification</td><td>Each op has exactly one <code>type</code>: <code>action</code>, <code>query</code> or <code>event</code></td></tr>
+<tr><td>Request/reply shape</td><td>Attribute-name lists under <code>do.request</code>, <code>do.reply</code>, <code>dump.request</code>, <code>dump.reply</code></td><td><code>request</code> and <code>reply</code> placements (<code>attrs</code>, <code>optional-attrs</code>)</td></tr>
+<tr><td>Multi-part results</td><td>Dump: a series of messages terminated by <code>NLMSG_DONE</code></td><td>Query: one reply returned in fragments, resumable by cursor, with a generation check for staleness</td></tr>
+<tr><td>Permissions</td><td><code>flags: [admin-perm, uns-admin-perm]</code> (capability checks)</td><td><code>fd-access: read | read-write</code> (how the descriptor was opened); default <code>read-write</code></td></tr>
+<tr><td>Hooks</td><td><code>pre</code> and <code>post</code> function names per <code>do</code> / <code>dump</code></td><td>A family-wide pre/post pair, plus a per-op pair with <code>pre-post: true</code>; implemented by name convention, not named in the spec</td></tr>
+<tr><td>Conditional presence</td><td><code>config-cond</code> (kernel config option)</td><td><code>optional: true</code> (family opts in per device at init) and <code>availability: dynamic</code> (enable and disable at run time)</td></tr>
+<tr><td>Introspection of what exists</td><td>Policy dump via the <code>nlctrl</code> family</td><td>The <code>families-dump</code>, <code>ops-dump</code> and <code>op-schema-get</code> operations of the root family, which report the effective per-device schema including disabled ops</td></tr>
+</table>
+
+<h2 id="events">Events and notifications</h2>
+<table>
+<tr><th></th><th>Netlink</th><th>CTLV</th></tr>
+<tr><td>Declaration</td><td>A command with <code>notify</code> (reuse another command's reply type) or <code>event</code> (explicit attribute list), assigned an <code>mcgrp</code></td><td>An op with <code>type: event</code> and its own <code>reply</code></td></tr>
+<tr><td>Delivery group</td><td><code>mcast-groups</code>; a socket joins a group</td><td>No groups. Each open file description subscribes to individual events (<code>subscriptions-add</code>) and has its own queue</td></tr>
+<tr><td>Overflow</td><td>Socket buffer overrun</td><td>A bounded queue (<code>event-queue-set</code>), with an <code>event-overflow</code> record reporting a sequence range and dropped count</td></tr>
+<tr><td>Device removal</td><td>None in the language</td><td><code>device-removed</code> event in the root family</td></tr>
+</table>
+
+<h2 id="evolution">Evolution and tooling</h2>
+<table>
+<tr><th></th><th>Netlink</th><th>CTLV</th></tr>
+<tr><td>Generated outputs</td><td>UAPI header, kernel policy and operation tables, and user-space code, by <code>ynl_gen_c.py</code> from markers in the target files</td><td>UAPI header, kernel header and kernel source, by <code>tools/ctlv</code> from a manifest (<code>generated-files.yaml</code>)</td></tr>
+<tr><td>User-space support</td><td>The YNL Python CLI and generated C user libraries read the same specs</td><td>The generator has UAPI and kernel modes only; user space discovers the schema at run time through the root family's introspection operations</td></tr>
+<tr><td>Registry</td><td>None; family names are resolved by the kernel at run time</td><td>Append-only <code>families.yaml</code>; position is the ID; deprecated entries keep their slot</td></tr>
+<tr><td>Compatibility enforcement</td><td>Regeneration keeps generated files in sync; no snapshot of the interface itself</td><td>Per-family ABI snapshot and a registry baseline; narrowing a bound, making a placement required, removing or renumbering anything fails the check</td></tr>
+<tr><td>Schema levels</td><td><code>genetlink</code> for new families; <code>genetlink-c</code>, <code>genetlink-legacy</code>, <code>netlink-raw</code> for older protocols with quirks (fixed headers, structs, sub-messages, raw protocols)</td><td>One schema; there are no pre-existing protocols to describe</td></tr>
+</table>
+
+<h2 id="keymap">Key-by-key map</h2>
+<p>Closest equivalents. A dash means there is no counterpart.</p>
+<table>
+<tr><th>Netlink</th><th>CTLV</th></tr>
+<tr><td><code>name</code></td><td><code>family.name</code></td></tr>
+<tr><td><code>doc</code></td><td>—</td></tr>
+<tr><td><code>protocol</code></td><td>—</td></tr>
+<tr><td><code>uapi-header</code></td><td><code>generated-files.yaml</code> <code>outputs.uapi-header</code></td></tr>
+<tr><td><code>definitions</code> <code>type: enum</code></td><td><code>enums</code></td></tr>
+<tr><td><code>definitions</code> <code>type: flags</code></td><td><code>flags</code></td></tr>
+<tr><td><code>definitions</code> <code>type: const</code></td><td>—</td></tr>
+<tr><td><code>value-start</code>, <code>entries</code></td><td><code>values</code> (fixed start)</td></tr>
+<tr><td><code>render-max</code>, <code>header</code>, <code>scope</code></td><td>—</td></tr>
+<tr><td><code>attribute-sets</code> entry</td><td><code>attr-groups</code> entry (declaration) plus <code>attr-sets</code> entry (use)</td></tr>
+<tr><td><code>subset-of</code></td><td>Selecting a subset of a group in an <code>attr-set</code></td></tr>
+<tr><td><code>name-prefix</code>, <code>enum-name</code></td><td>—</td></tr>
+<tr><td>attribute <code>type</code></td><td>attribute <code>type</code>, <code>enum</code>, <code>flags</code>, <code>attrs</code> or <code>blob</code></td></tr>
+<tr><td><code>value</code> (attribute or op)</td><td>—</td></tr>
+<tr><td><code>multi-attr</code></td><td><code>max-occurrences</code></td></tr>
+<tr><td><code>nested-attributes</code></td><td><code>attrs</code>, <code>optional-attrs</code></td></tr>
+<tr><td><code>checks.min</code>, <code>checks.max</code></td><td><code>min</code>, <code>max</code></td></tr>
+<tr><td><code>checks.min-len</code>, <code>max-len</code>, <code>exact-len</code></td><td><code>min-length</code>, <code>max-length</code>, <code>length</code></td></tr>
+<tr><td><code>checks.flags-mask</code></td><td>implied by <code>flags</code></td></tr>
+<tr><td><code>byte-order</code>, <code>display-hint</code></td><td>— (<code>unit</code>, <code>scale</code> serve a different purpose)</td></tr>
+<tr><td><code>operations.list</code></td><td><code>ops</code></td></tr>
+<tr><td><code>do</code></td><td><code>type: action</code></td></tr>
+<tr><td><code>dump</code></td><td><code>type: query</code></td></tr>
+<tr><td><code>notify</code>, <code>event</code>, <code>mcgrp</code></td><td><code>type: event</code> with <code>reply</code></td></tr>
+<tr><td><code>attribute-set</code> (on an operation)</td><td>—; <code>request</code> / <code>reply</code> select any sets</td></tr>
+<tr><td><code>request.attributes</code>, <code>reply.attributes</code></td><td><code>request.attrs</code>, <code>reply.attrs</code> and the <code>optional-attrs</code> forms</td></tr>
+<tr><td><code>flags: [admin-perm]</code></td><td><code>fd-access</code> (different mechanism)</td></tr>
+<tr><td><code>pre</code>, <code>post</code></td><td><code>pre-post</code></td></tr>
+<tr><td><code>config-cond</code></td><td><code>optional</code> / <code>availability</code> (per device, not per build)</td></tr>
+<tr><td><code>dont-validate</code></td><td>—</td></tr>
+<tr><td><code>mcast-groups</code></td><td>— (subscriptions)</td></tr>
+<tr><td><code>kernel-family</code></td><td><code>family.pre-init</code>, <code>post-init</code>, <code>pre-fini</code> (lifecycle callbacks)</td></tr>
+<tr><td>—</td><td><code>family.inherits</code>, <code>stub</code>, <code>recursive</code>, <code>blob</code>, <code>unit</code>, <code>scale</code>, <code>suggested-reply-length</code>, <code>availability</code>, <code>optional</code></td></tr>
+</table>
+
+<h2 id="choosing">Reading across</h2>
+<p>Most differences trace back to two facts.</p>
+<ul>
+  <li><strong>CTLV owns the whole stack for its devices.</strong> It therefore pins identity (registry), computes and bounds every message size, rejects what the schema does not place, and checks its own history. Netlink specs describe a protocol that mostly already exists in C and has to accommodate legacy, so they offer more escape hatches (<code>value</code>, byte order, <code>dont-validate</code>, header and constant imports, four schema levels) and fewer guarantees.</li>
+  <li><strong>CTLV devices form families that extend each other.</strong> Inheritance, stubs and the root family's introspection exist for that. A Netlink family stands alone.</li>
+</ul>
+<p>Porting an interface from a Netlink spec to CTLV therefore mostly means collapsing integer widths to <code>uint</code>/<code>sint</code> with ranges, turning each operation's attribute list into an attr set with explicit required and optional members, replacing <code>multi-attr</code> with a bound, replacing multicast groups with event operations, and deciding what each operation's <code>fd-access</code> should be.</p>
+
+<div class="pager">
+  <a href="reference.html">← Reference</a>
+  <a href="index.html">Overview →</a>
+</div>
+</main>
+</div>
+</body>
+</html>
