@@ -1,7 +1,3 @@
-Hi Jiri,
-
-Some comments on the TDX provider implementation below.
-
 > From 05c726269e848ed23eb58be6dd4b40db18e7a8b3 Mon Sep 17 00:00:00 2001
 > From: Jiri Pirko <jiri@nvidia.com>
 > Date: Thu, 15 Oct 2026 16:50:53 +0200
@@ -52,13 +48,7 @@ Also state that `evidence_get` holds the instance lock across a Quote (see below
 > +
 > +The provider consumes only ``<linux/tdx-guest.h>``.  It does not call the TDX
 
-The doc claims "successful replies carry the matching MR-journal boundary". The journal
-(`att->log->generation`) only advances for extends that go through this CTLV instance. RTMRs are
-also extendable through the native TSM-MR sysfs and the TDX misc ioctl, which this very
-paragraph says remain available "independently", and those bypass the journal. So the
-generation reported alongside a TDREPORT/Quote can be stale relative to the RTMR values actually
-bound in the report, and the journal cannot be replayed to the reported RTMR values. Either
-document the limitation or have the provider detect/resync (e.g. `mr_read` before and after).
+"Successful replies carry the matching MR-journal boundary" is not true when RTMRs are extended through the native TSM-MR sysfs or the TDX misc ioctl, which stay available "independently" and bypass the journal. The reported generation can then be stale relative to the RTMR values bound in the report, and the journal cannot be replayed to them. Either document the limitation or have the provider detect it (e.g. `mr_read` before and after the evidence call).
 
 > +misc ioctl, configfs TSM-report, or TSM-MR sysfs frontends.
 > diff --git a/drivers/attestation/Kconfig b/drivers/attestation/Kconfig
@@ -76,11 +66,10 @@ document the limitation or have the provider detect/resync (e.g. `mr_read` befor
 > +	tristate "TDX attestation provider"
 > +	depends on TDX_GUEST_DRIVER
 
-Missing 'depends on X86'/etc. is covered by `TDX_GUEST_DRIVER`, fine. But the module has no
-device table/`MODULE_ALIAS` or softdep, and tdx-guest never `request_module()`s it, so with
-=m nothing ever loads attestation-tdx automatically; users must modprobe by hand. Also,
-the native driver supports only a single client; building another provider consumer (e.g. a
-different out-of-tree client) makes this fail with `-EBUSY` at module load. Mention in help.
+Two changes requested.
+
+1. With `=m` nothing loads `attestation-tdx` automatically: the module has no device table, `MODULE_ALIAS` or softdep, and tdx-guest never calls `request_module()` for it. Add one of these, or say in the help text that it must be loaded by hand.
+2. The native driver supports only a single client, so a second consumer (for example an out-of-tree one) makes this module fail to load with `-EBUSY`. Say so in the help text.
 
 > +	help
 > +	  Exposes TDREPORT, Quote, MRTD and RTMR operations through the common
@@ -258,15 +247,11 @@ should return `-EINVAL`, and should probably live in the core.
 > +	object = &request->objects[0];
 > +	buffer = kvmalloc(object->supported_object->max_length, GFP_KERNEL);
 
-Every TDREPORT request (1 KiB) is fine, but every Quote request does a 128 KiB kvmalloc plus a
-memcpy into the destination blob, even though the core already hands us a resolved
-output blob of at least `max_length` bytes. Why the bounce buffer? `ctlv_blob` has a write helper
-but if it can be mapped/pinned this is a needless allocation on a path that holds the global
-instance lock. Also kvmalloc leaves the buffer uninitialised: if a native op returns 0 with
-*`out_length` > what it filled, stale heap goes to userspace. The provider trusts 'length' from
-the callee without checking length <= `max_length` before `ctlv_blob_write` (the core checks only
-afterwards, via `object_lengths`, and after the data has already been written into the blob).
-Please add 'if (length > `max_length`) ret = `-EIO`'. kvzalloc would be a cheap hardening.
+Three changes requested in `attestation_tdx_evidence_get()`.
+
+1. Check `length <= max_length` before `ctlv_blob_write()` and fail with `-EIO` otherwise. The callee's `length` is trusted today, and the core only checks `object_lengths` afterwards, after the data is already in the blob.
+2. Allocate the buffer with `kvzalloc()`. `kvmalloc()` leaves it uninitialised, so a native op that returns 0 with `*length` larger than what it filled would send stale heap to userspace.
+3. Avoid the bounce buffer or explain it. Every Quote request does a 128 KiB allocation and a copy into the output blob, which the core already provides with at least `max_length` bytes, and it does so while holding the global instance lock. Write into the blob directly if it can be mapped or pinned; otherwise add a comment saying why the copy is needed.
 
 > +	if (!buffer)
 > +		return -ENOMEM;

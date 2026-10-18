@@ -1,7 +1,3 @@
-Hi Jiri,
-
-Some comments on this patch below.
-
 > From 639a42987b36852de2813ce35d221d730467c709 Mon Sep 17 00:00:00 2001
 > From: Jiri Pirko <jiri@nvidia.com>
 > Date: Thu, 15 Oct 2026 16:50:51 +0200
@@ -519,12 +515,7 @@ Also `add()` runs before the op table is guaranteed immutable; fine.
 > +		return;
 > +	tdx_client->remove(tdx_client_priv);
 
-`remove()` is called under `client_lock` and, per the documentation, is
-expected to 'drain' running operations. If an op in flight is stuck
-waiting for the Quote (`quote_lock` held, up to the completion timeout) the
-unregister blocks for that long with `client_lock` held, and ops calling
-`tdx_guest_*` do not take `client_lock` so no deadlock, OK; but make the
-draining guarantee explicit in the header kernel-doc.
+State the draining guarantee in the header kernel-doc for `remove()`: it is called under `client_lock` and must wait for running operations, so unregistering can block for as long as an in-flight Quote holds `quote_lock` (up to the completion timeout).
 
 > +	tdx_client_priv = NULL;
 > +	tdx_client_attached = false;
@@ -559,13 +550,10 @@ case the registrant is never told (it saw success).
 > +}
 > +EXPORT_SYMBOL_NS_GPL(tdx_guest_client_register, "TDX_GUEST");
 
-New export namespace `TDX_GUEST` is introduced without
-`MODULE_IMPORT_NS` in the series' consumer being mentioned here; also the
-header has no !`CONFIG_TDX_GUEST_DRIVER` stubs, so any other user must
-depend on the Kconfig symbol explicitly. OK for now; just noting this is the
-only in-tree user (`providers/tdx.c`, patch 20) and that the patch is
-introduced two patches before its user, so nothing here is exercised or
-buildable-tested until then.
+Two changes requested.
+
+1. Say in the commit message that the new `TDX_GUEST` export namespace has one user, `providers/tdx.c` in patch 20, which imports it with `MODULE_IMPORT_NS("TDX_GUEST")`, and that nothing here is exercised or build-tested until then.
+2. Add `!CONFIG_TDX_GUEST_DRIVER` stubs to the header, or document that any other user must depend on the Kconfig symbol.
 
 > +
 > +void tdx_guest_client_unregister(const struct tdx_guest_client *client)
@@ -594,14 +582,7 @@ registered but never attached (service not ready) correctly clears
 > +	scoped_guard(mutex, &client_lock) {
 > +		tdx_service_ready = true;
 
-`tdx_service_ready` is set before the client is attached, but the misc
-device, TSM report and TSM-MR registration were done before; fine. However
-if attach fails the driver unwinds `tsm_report_register` but what about
-the TSM MR group registered earlier by `tdx_mr_init()` and the misc
-device: the existing error labels (`free_quote`/`free_misc`) handle those; so a
-failure in an optional in-kernel consumer now disables the userspace ioctl
-and configfs interfaces that the commit message promises to preserve.
-Prefer logging the failure and continuing.
+Do not fail `tdx_guest_init()` when `tdx_guest_client_attach()` fails. Log the error and continue, so the misc device, configfs TSM report and TSM-MR interfaces that the commit message promises to preserve stay available; an optional in-kernel consumer should not disable them. This also removes the new `unregister_tsm` unwind.
 
 > +		ret = tdx_guest_client_attach();
 > +		if (ret)
