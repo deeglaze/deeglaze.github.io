@@ -67,12 +67,13 @@ nav.side .brand {
 
 nav.side .switch {
   display: flex;
+  flex-wrap: wrap;
   gap: 0.5rem;
   margin: 0.5rem 0 1rem;
 }
 
 nav.side .switch a {
-  flex: 1;
+  flex: 1 1 40%;
   text-align: center;
   padding: 0.25rem 0;
   border: 1px solid var(--rule);
@@ -175,6 +176,139 @@ td.wrap code { white-space: normal; }
 
 dl.keys dt { font-weight: 600; margin-top: 1rem; }
 dl.keys dd { margin: 0.2rem 0 0 1.25rem; }
+
+[hidden] { display: none !important; }
+
+nav.side .patches a {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+nav.side .patches a.here { font-weight: 700; }
+
+.review-tabs { display: flex; gap: 0.5rem; align-items: center; margin: 1rem 0; }
+.review-tabs a:not(.rawlink) {
+  padding: 0.2rem 0.9rem;
+  border: 1px solid var(--rule);
+  border-radius: 4px;
+  text-decoration: none;
+  color: var(--fg);
+}
+.review-tabs a.here { background: var(--accent); border-color: var(--accent); color: var(--bg); }
+.review-tabs .rawlink { margin-left: auto; font-size: 0.9rem; }
+
+pre.review-raw { font-size: 0.8rem; line-height: 1.4; white-space: pre; }
+
+.rc {
+  padding: 0.4rem 1rem;
+  margin: 0.9rem 0;
+  border-left: 4px solid var(--note-rule);
+  background: var(--note-bg);
+  border-radius: 0 6px 6px 0;
+}
+.rc p { margin: 0.6rem 0; }
+.rc ul, .rc ol { margin: 0.6rem 0; padding-left: 1.6rem; }
+.rc li { margin: 0.25rem 0; }
+.rc p.list { white-space: pre-wrap; }
+.rc pre { background: none; padding: 0; margin: 0.6rem 0; }
+
+blockquote.q {
+  margin: 0.75rem 0;
+  padding-left: 0.8rem;
+  border-left: 3px solid var(--rule);
+  color: var(--muted);
+}
+blockquote.q pre { background: none; padding: 0; margin: 0; white-space: pre-wrap; }
+
+/* Diffs are black on white in both colour schemes. */
+.diff {
+  background: #fff;
+  color: #000;
+  border: 1px solid var(--rule);
+  border-radius: 6px;
+  overflow-x: auto;
+  margin: 0.75rem 0;
+  font: 0.82rem/1.45 ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+}
+.diff-in { display: inline-block; min-width: 100%; }
+.diff .l { white-space: pre; padding: 0 0.6rem; }
+.diff .sg { display: inline-block; width: 1.2ch; user-select: none; }
+.diff .add { background: #e6ffec; }
+.diff .del { background: #ffebe9; }
+.diff .add .ch { background: #96e6a8; }
+.diff .del .ch { background: #ffaaa3; }
+.diff .hunk, .diff .file, .diff .meta { background: #eef1f4; color: #57606a; }
+.diff .file { font-weight: 600; }
+.diff .hunk { color: #0550ae; }
+.diff .snip {
+  display: flex;
+  gap: 0.75rem;
+  padding: 0 0.6rem;
+  border-top: 1px solid #d0d7de;
+  border-bottom: 1px solid #d0d7de;
+  background: #f6f8fa;
+  color: #57606a;
+}
+.diff .snip button {
+  padding: 0;
+  border: 0;
+  background: none;
+  font: inherit;
+  color: var(--accent);
+  cursor: pointer;
+}
+.diff .snip button:hover { text-decoration: underline; }
+
+ol.reviews { padding-left: 0; list-style: none; }
+ol.reviews li { margin: 0.3rem 0; }
+
+main.wide { max-width: none; }
+p.xlink { margin: 0.25rem 0 1rem; }
+
+.walk .woverview { font-size: 1.05rem; }
+.walk .wtoc { margin: 1.5rem 0; }
+.walk .wtoc ul { columns: 2; padding-left: 1.2rem; }
+.walk .wtoc .count { color: var(--muted); font-size: 0.85rem; }
+.walk-file h2 { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; font-size: 1.2rem; }
+.walk-file .wpurpose { color: var(--muted); max-width: 60rem; }
+.walk-unit {
+  display: grid;
+  grid-template-columns: minmax(0, 3fr) minmax(16rem, 2fr);
+  gap: 1.25rem;
+  align-items: start;
+  margin: 1rem 0;
+}
+.walk-unit .diff { margin: 0; max-height: 36rem; overflow: auto; }
+.walk-unit .wnote {
+  position: sticky;
+  top: 1rem;
+  padding: 0.6rem 1rem;
+  border-left: 4px solid var(--note-rule);
+  background: var(--note-bg);
+  border-radius: 0 6px 6px 0;
+  font-size: 0.93rem;
+}
+.walk-unit .wnote h4 { margin: 0 0 0.3rem; font-size: 1rem; word-break: break-word; }
+.walk-unit .wnote h4 a { color: inherit; text-decoration: none; font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; }
+.walk-unit .wnote .kind {
+  margin-left: 0.5rem;
+  padding: 0 0.4rem;
+  border: 1px solid var(--rule);
+  border-radius: 3px;
+  font-size: 0.72rem;
+  color: var(--muted);
+  font-family: system-ui, sans-serif;
+}
+.walk-unit .wnote p { margin: 0.4rem 0; }
+.walk-unit .wnote p.wsum { font-weight: 600; }
+.walk-unit .wnote ul { margin: 0.4rem 0; padding-left: 1.2rem; }
+
+@media (max-width: 52rem) {
+  .walk-unit { grid-template-columns: 1fr; }
+  .walk-unit .wnote { position: static; }
+  .walk .wtoc ul { columns: 1; }
+}
 
 @media (max-width: 52rem) {
   .layout { grid-template-columns: 1fr; }

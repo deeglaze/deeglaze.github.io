@@ -1,0 +1,333 @@
+From 6626973cffe97e0ff659f057ff1821142d840071 Mon Sep 17 00:00:00 2001
+From: Jiri Pirko <jiri@nvidia.com>
+Date: Thu, 15 Oct 2026 16:50:52 +0200
+Subject: [PATCH 19/20] attestation: Add the TDX family specification and
+ generated files
+
+Define the TDX attestation family and reserve family ID 2. Add its ABI
+snapshot, registry entry and generated kernel and UAPI files.
+
+The ABI is intentionally specification-first. The generated descriptor is
+linked with the provider implementation in the following patch.
+
+Assisted-by: Cursor: GPT-5.6 Sol
+Assisted-by: Cursor: Claude Opus 5.5
+Signed-off-by: Jiri Pirko <jiri@nvidia.com>
+---
+ .../ctlv/abi/ctlv-attestation-tdx.yaml        | 22 +++++++
+ Documentation/ctlv/abi/families.registry.yaml |  1 +
+ Documentation/ctlv/families.yaml              |  1 +
+ Documentation/ctlv/generated-files.yaml       |  7 ++
+ .../ctlv/specs/ctlv-attestation-tdx.yaml      | 30 +++++++++
+ .../generated/ctlv_attestation_tdx_gen.c      | 61 +++++++++++++++++
+ .../generated/ctlv_attestation_tdx_gen.h      | 66 +++++++++++++++++++
+ include/uapi/linux/ctlv_attestation_tdx_gen.h | 44 +++++++++++++
+ include/uapi/linux/ctlv_families_gen.h        |  1 +
+ 9 files changed, 233 insertions(+)
+ create mode 100644 Documentation/ctlv/abi/ctlv-attestation-tdx.yaml
+ create mode 100644 Documentation/ctlv/specs/ctlv-attestation-tdx.yaml
+ create mode 100644 drivers/attestation/generated/ctlv_attestation_tdx_gen.c
+ create mode 100644 drivers/attestation/generated/ctlv_attestation_tdx_gen.h
+ create mode 100644 include/uapi/linux/ctlv_attestation_tdx_gen.h
+
+diff --git a/Documentation/ctlv/abi/ctlv-attestation-tdx.yaml b/Documentation/ctlv/abi/ctlv-attestation-tdx.yaml
+new file mode 100644
+index 000000000000..89b80d84e7f1
+--- /dev/null
++++ b/Documentation/ctlv/abi/ctlv-attestation-tdx.yaml
+@@ -0,0 +1,22 @@
++# SPDX-License-Identifier: ((GPL-2.0 WITH Linux-syscall-note) OR BSD-3-Clause)
++%YAML 1.2
++---
++# Checked-in ABI snapshot of the ctlv-attestation-tdx family, written by
++# "make -C tools/ctlv abi-update".
++#
++# The checker compares this family's declarations and inherited stub fills
++# against this file. Updating it is how a UAPI change gets reviewed; an update
++# that removes or renumbers anything, narrows a bound, or makes a placement
++# required is an ABI break, whatever this file says afterwards.
++family: {name: ctlv-attestation-tdx, id: 2, inherits: ctlv-attestation,
++         pre-init: true}
++attr-groups:
++  info:
++    id: 1
++    attrs:
++      mrconfigid: {id: 1, type: binary, length: 48}
++      mrowner: {id: 2, type: binary, length: 48}
++      mrownerconfig: {id: 3, type: binary, length: 48}
++fills:
++  device-info:
++    attrs: [info.mrconfigid, info.mrowner, info.mrownerconfig]
+diff --git a/Documentation/ctlv/abi/families.registry.yaml b/Documentation/ctlv/abi/families.registry.yaml
+index fa511b709fc1..193e3570ab95 100644
+--- a/Documentation/ctlv/abi/families.registry.yaml
++++ b/Documentation/ctlv/abi/families.registry.yaml
+@@ -6,3 +6,4 @@
+ families:
+   - ctlv
+   - ctlv-attestation
++  - ctlv-attestation-tdx
+diff --git a/Documentation/ctlv/families.yaml b/Documentation/ctlv/families.yaml
+index d78025a9072c..d0e1493db498 100644
+--- a/Documentation/ctlv/families.yaml
++++ b/Documentation/ctlv/families.yaml
+@@ -12,3 +12,4 @@
+ families:
+   - ctlv
+   - ctlv-attestation
++  - ctlv-attestation-tdx
+diff --git a/Documentation/ctlv/generated-files.yaml b/Documentation/ctlv/generated-files.yaml
+index 669f1f8d51b4..00ad23af7f65 100644
+--- a/Documentation/ctlv/generated-files.yaml
++++ b/Documentation/ctlv/generated-files.yaml
+@@ -22,3 +22,10 @@ families:
+       uapi-header: include/uapi/linux/ctlv_attestation_gen.h
+       kernel-header: drivers/attestation/generated/ctlv_attestation_gen.h
+       kernel-source: drivers/attestation/generated/ctlv_attestation_gen.c
++
++  - name: ctlv-attestation-tdx
++    source: Documentation/ctlv/specs/ctlv-attestation-tdx.yaml
++    outputs:
++      uapi-header: include/uapi/linux/ctlv_attestation_tdx_gen.h
++      kernel-header: drivers/attestation/generated/ctlv_attestation_tdx_gen.h
++      kernel-source: drivers/attestation/generated/ctlv_attestation_tdx_gen.c
+diff --git a/Documentation/ctlv/specs/ctlv-attestation-tdx.yaml b/Documentation/ctlv/specs/ctlv-attestation-tdx.yaml
+new file mode 100644
+index 000000000000..09f4d9916f82
+--- /dev/null
++++ b/Documentation/ctlv/specs/ctlv-attestation-tdx.yaml
+@@ -0,0 +1,30 @@
++# SPDX-License-Identifier: ((GPL-2.0 WITH Linux-syscall-note) OR BSD-3-Clause)
++%YAML 1.2
++---
++family:
++  name: ctlv-attestation-tdx
++  inherits: ctlv-attestation
++  pre-init: true
++
++attr-groups:
++  - name: info
++    attrs:
++      - name: mrconfigid
++        type: binary
++        min-length: 48
++        max-length: 48
++      - name: mrowner
++        type: binary
++        min-length: 48
++        max-length: 48
++      - name: mrownerconfig
++        type: binary
++        min-length: 48
++        max-length: 48
++
++attr-sets:
++  - name: device-info
++    attrs:
++      - info.mrconfigid
++      - info.mrowner
++      - info.mrownerconfig
+diff --git a/drivers/attestation/generated/ctlv_attestation_tdx_gen.c b/drivers/attestation/generated/ctlv_attestation_tdx_gen.c
+new file mode 100644
+index 000000000000..25f03a8d68fe
+--- /dev/null
++++ b/drivers/attestation/generated/ctlv_attestation_tdx_gen.c
+@@ -0,0 +1,61 @@
++// SPDX-License-Identifier: ((GPL-2.0 WITH Linux-syscall-note) OR BSD-3-Clause)
++/* Do not edit, regenerate with tools/ctlv/ctlv-regen.sh, from: */
++/*	Documentation/ctlv/specs/ctlv-attestation-tdx.yaml */
++/* CTLV-GEN kernel source */
++
++#define _CTLV_GENERATED_METADATA_ONLY
++#include <linux/array_size.h>
++#include <linux/build_bug.h>
++#include <linux/ctlv_family.h>
++#include <linux/export.h>
++
++#include <uapi/linux/ctlv_gen.h>
++#include <uapi/linux/ctlv_attestation_tdx_gen.h>
++
++#include "ctlv_attestation_tdx_gen.h"
++
++static const struct ctlv_node_schema device_info_fill_node_schemas[] = {
++	CTLV_NODE_SCHEMA_ROOT(1, 3, 3),
++	CTLV_NODE_SCHEMA_BINARY(CTLV_ATTESTATION_TDX_ATTR_INFO_MRCONFIGID, 1, 48, 48),
++	CTLV_NODE_SCHEMA_BINARY(CTLV_ATTESTATION_TDX_ATTR_INFO_MROWNER, 1, 48, 48),
++	CTLV_NODE_SCHEMA_BINARY(CTLV_ATTESTATION_TDX_ATTR_INFO_MROWNERCONFIG, 1, 48, 48),
++};
++
++/* The extension points this family fills. */
++static const struct ctlv_stub_fill_schema ctlv_attestation_tdx_stub_fill_schemas[] = {
++	CTLV_STUB_FILL_SCHEMA(CTLV_FAMILY_ATTESTATION, CTLV_ATTESTATION_SET_DEVICE_INFO,
++			      device_info),
++};
++
++/* The family ID is its position in the central registry. */
++const struct ctlv_family_schema ctlv_attestation_tdx_schema = {
++	.name = "ctlv-attestation-tdx",
++	.family_id = 2,
++	.stub_fill_schemas = ctlv_attestation_tdx_stub_fill_schemas,
++	.stub_fill_schemas_count = ARRAY_SIZE(ctlv_attestation_tdx_stub_fill_schemas),
++};
++
++/* Maximum uevent cost for this family chain. */
++static_assert(150 <= CTLV_UEVENT_MAX_LEN);
++static_assert(5 <= CTLV_UEVENT_MAX_VARS);
++
++/* Extension-point callbacks. */
++static const struct ctlv_stub_ops ctlv_attestation_tdx_stub_ops[] = {
++	CTLV_STUB_OPS(CTLV_FAMILY_ATTESTATION, CTLV_ATTESTATION_SET_DEVICE_INFO,
++		      ctlv_attestation_tdx_device_info),
++};
++
++/* Family descriptor used by ctlv_create(). */
++const struct ctlv_family ctlv_attestation_tdx_family = {
++	.schema = &ctlv_attestation_tdx_schema,
++	.parent = &ctlv_attestation_family,
++	.pre = ctlv_attestation_tdx_op_pre,
++	.post = ctlv_attestation_tdx_op_post,
++	.priv_size = ctlv_attestation_tdx_priv_size,
++	.pre_init = ctlv_attestation_tdx_pre_init,
++	.init = ctlv_attestation_tdx_init,
++	.fini = ctlv_attestation_tdx_fini,
++	.stub_ops = ctlv_attestation_tdx_stub_ops,
++	.stub_ops_count = ARRAY_SIZE(ctlv_attestation_tdx_stub_ops),
++};
++EXPORT_SYMBOL_NS_GPL(ctlv_attestation_tdx_family, "CTLV");
+diff --git a/drivers/attestation/generated/ctlv_attestation_tdx_gen.h b/drivers/attestation/generated/ctlv_attestation_tdx_gen.h
+new file mode 100644
+index 000000000000..d182d04cb086
+--- /dev/null
++++ b/drivers/attestation/generated/ctlv_attestation_tdx_gen.h
+@@ -0,0 +1,66 @@
++/* SPDX-License-Identifier: ((GPL-2.0 WITH Linux-syscall-note) OR BSD-3-Clause) */
++/* Do not edit, regenerate with tools/ctlv/ctlv-regen.sh, from: */
++/*	Documentation/ctlv/specs/ctlv-attestation-tdx.yaml */
++/* CTLV-GEN kernel header */
++
++/* Kernel metadata and family API of the ctlv-attestation-tdx CTLV family. */
++
++#ifndef _LINUX_CTLV_ATTESTATION_TDX_GEN_H
++#define _LINUX_CTLV_ATTESTATION_TDX_GEN_H
++
++#include <linux/ctlv_family.h>
++#include <linux/err.h>
++#include <linux/errno.h>
++
++#include <uapi/linux/ctlv_attestation_tdx_gen.h>
++
++#include "ctlv_attestation_gen.h"
++
++extern const struct ctlv_family_schema ctlv_attestation_tdx_schema;
++
++/* Family-wide hooks around every effective non-core op. */
++int ctlv_attestation_tdx_op_pre(void *priv, struct ctlv_op_ctx *ctx);
++void ctlv_attestation_tdx_op_post(void *priv, struct ctlv_op_ctx *ctx);
++
++/* Core-allocated family priv lifecycle. */
++size_t ctlv_attestation_tdx_priv_size(void);
++const void *ctlv_attestation_tdx_pre_init(const void *init_info);
++int ctlv_attestation_tdx_init(struct ctlv_device *ctlvdev, const void *init_info, void *priv);
++void ctlv_attestation_tdx_fini(struct ctlv_device *ctlvdev, void *priv);
++
++/* device-info of ctlv-attestation: fill callback. */
++int ctlv_attestation_tdx_device_info_fill(void *priv, struct ctlv_op_ctx *ctx,
++					  const struct ctlv_cursor *request,
++					  struct ctlv_cursor *nest);
++
++extern const struct ctlv_family ctlv_attestation_tdx_family;
++
++#ifndef _CTLV_GENERATED_METADATA_ONLY
++
++/* Reading a validated message. A blob has a resolver instead of a getter. */
++CTLV_IN_REF(ctlv_attestation_tdx_device_info_info_mrconfigid,
++	    &ctlv_attestation_tdx_schema.stub_fill_schemas[0].members,
++	    CTLV_ATTESTATION_TDX_ATTR_INFO_MRCONFIGID, 0, 0, CTLV_SCHEMA_BINARY)
++CTLV_IN_HAS(ctlv_attestation_tdx_device_info_info_mrconfigid)
++CTLV_IN_BINARY(ctlv_attestation_tdx_device_info_info_mrconfigid)
++CTLV_IN_REF(ctlv_attestation_tdx_device_info_info_mrowner,
++	    &ctlv_attestation_tdx_schema.stub_fill_schemas[0].members,
++	    CTLV_ATTESTATION_TDX_ATTR_INFO_MROWNER, 0, 1, CTLV_SCHEMA_BINARY)
++CTLV_IN_HAS(ctlv_attestation_tdx_device_info_info_mrowner)
++CTLV_IN_BINARY(ctlv_attestation_tdx_device_info_info_mrowner)
++CTLV_IN_REF(ctlv_attestation_tdx_device_info_info_mrownerconfig,
++	    &ctlv_attestation_tdx_schema.stub_fill_schemas[0].members,
++	    CTLV_ATTESTATION_TDX_ATTR_INFO_MROWNERCONFIG, 0, 2, CTLV_SCHEMA_BINARY)
++CTLV_IN_HAS(ctlv_attestation_tdx_device_info_info_mrownerconfig)
++CTLV_IN_BINARY(ctlv_attestation_tdx_device_info_info_mrownerconfig)
++
++/* Writing a reply. An append is atomic; a nest ends with ctlv_nest_end(). */
++CTLV_PUT_BINARY(ctlv_attestation_tdx_info_mrconfigid, CTLV_ATTESTATION_TDX_ATTR_INFO_MRCONFIGID,
++		CTLV_SCHEMA_BINARY)
++CTLV_PUT_BINARY(ctlv_attestation_tdx_info_mrowner, CTLV_ATTESTATION_TDX_ATTR_INFO_MROWNER,
++		CTLV_SCHEMA_BINARY)
++CTLV_PUT_BINARY(ctlv_attestation_tdx_info_mrownerconfig,
++		CTLV_ATTESTATION_TDX_ATTR_INFO_MROWNERCONFIG, CTLV_SCHEMA_BINARY)
++#endif /* _CTLV_GENERATED_METADATA_ONLY */
++
++#endif /* _LINUX_CTLV_ATTESTATION_TDX_GEN_H */
+diff --git a/include/uapi/linux/ctlv_attestation_tdx_gen.h b/include/uapi/linux/ctlv_attestation_tdx_gen.h
+new file mode 100644
+index 000000000000..04c8dbc3d07c
+--- /dev/null
++++ b/include/uapi/linux/ctlv_attestation_tdx_gen.h
+@@ -0,0 +1,44 @@
++/* SPDX-License-Identifier: ((GPL-2.0 WITH Linux-syscall-note) OR BSD-3-Clause) */
++/* Do not edit, regenerate with tools/ctlv/ctlv-regen.sh, from: */
++/*	Documentation/ctlv/specs/ctlv-attestation-tdx.yaml */
++/* CTLV-GEN uapi header */
++
++/*
++ * Constants of the ctlv-attestation-tdx CTLV family. Attr and op IDs are complete; the wire format
++ * carrying them is in <linux/ctlv.h>.
++ *
++ * The inherited ctlv-attestation header is included here, so one include covers the whole effective
++ * schema.
++ */
++
++#ifndef _UAPI_LINUX_CTLV_ATTESTATION_TDX_GEN_H
++#define _UAPI_LINUX_CTLV_ATTESTATION_TDX_GEN_H
++
++#include <linux/ctlv.h>
++#include <linux/ctlv_attestation_gen.h>
++#include <linux/ctlv_families_gen.h>
++
++/* attr groups */
++enum _ctlv_attestation_tdx_group {
++	CTLV_ATTESTATION_TDX_GROUP_INFO = 1,
++};
++
++#define _CTLV_ATTESTATION_TDX_ATTR(_group, _attr) \
++	CTLV_ATTR(CTLV_FAMILY_ATTESTATION_TDX, (_group), (_attr))
++
++/* attrs of group info */
++#define _CTLV_ATTESTATION_TDX_ATTR_INFO(_attr) \
++	_CTLV_ATTESTATION_TDX_ATTR(CTLV_ATTESTATION_TDX_GROUP_INFO, \
++				   _CTLV_ATTESTATION_TDX_ATTR_INFO_##_attr)
++
++enum _ctlv_attestation_tdx_attr_info {
++	_CTLV_ATTESTATION_TDX_ATTR_INFO_MRCONFIGID = 1,
++	_CTLV_ATTESTATION_TDX_ATTR_INFO_MROWNER,
++	_CTLV_ATTESTATION_TDX_ATTR_INFO_MROWNERCONFIG,
++};
++
++#define CTLV_ATTESTATION_TDX_ATTR_INFO_MRCONFIGID _CTLV_ATTESTATION_TDX_ATTR_INFO(MRCONFIGID)
++#define CTLV_ATTESTATION_TDX_ATTR_INFO_MROWNER _CTLV_ATTESTATION_TDX_ATTR_INFO(MROWNER)
++#define CTLV_ATTESTATION_TDX_ATTR_INFO_MROWNERCONFIG _CTLV_ATTESTATION_TDX_ATTR_INFO(MROWNERCONFIG)
++
++#endif /* _UAPI_LINUX_CTLV_ATTESTATION_TDX_GEN_H */
+diff --git a/include/uapi/linux/ctlv_families_gen.h b/include/uapi/linux/ctlv_families_gen.h
+index 2ea3068868be..25c90509d8ad 100644
+--- a/include/uapi/linux/ctlv_families_gen.h
++++ b/include/uapi/linux/ctlv_families_gen.h
+@@ -11,6 +11,7 @@
+ enum _ctlv_family {
+ 	CTLV_FAMILY_ROOT,
+ 	CTLV_FAMILY_ATTESTATION,
++	CTLV_FAMILY_ATTESTATION_TDX,
+ };
+ 
+ #endif /* _UAPI_LINUX_CTLV_FAMILIES_GEN_H */
+-- 
+2.55.0
+

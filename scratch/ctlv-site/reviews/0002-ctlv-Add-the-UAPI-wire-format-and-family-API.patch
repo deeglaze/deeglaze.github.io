@@ -1,0 +1,769 @@
+Hi Jiri,
+
+Review below, inline.
+
+> From 81f43258ce827b4c10fc3a045e3e9e04b689ac1b Mon Sep 17 00:00:00 2001
+> From: Jiri Pirko <jiri@nvidia.com>
+> Date: Thu, 15 Oct 2026 16:50:35 +0200
+> Subject: [PATCH 02/20] ctlv: Add the UAPI wire format and family API
+>
+> Define CTLV's common TLV transport, ioctl, event records, identifiers
+
+The subject says "Add the UAPI wire format and family API", but the patch is header-only with no consumer until later patches, and `ctlv_family.h` is not self-contained (see below: it uses `CTLV_OP_TYPE_*`, `CTLV_OP_AVAILABILITY_*`, `ARRAY_SIZE()` and `static_assert`-style generated names that come from patch 3/generated files or are not included). Nothing compiles this header in this patch, so the missing includes are not caught until patch 3+. Please at least say in the log that these headers are not buildable stand-alone until the generated headers land.
+
+> and limits. Add the in-kernel API used by family implementations and
+> generated code.
+>
+> Assisted-by: Cursor: GPT-5.6 Sol
+> Assisted-by: Cursor: Claude Opus 5.5
+> Signed-off-by: Jiri Pirko <jiri@nvidia.com>
+> ---
+>  .../userspace-api/ioctl/ioctl-number.rst      |   2 +
+>  MAINTAINERS                                   |   2 +
+>  include/linux/ctlv.h                          |  55 +++
+>  include/linux/ctlv_family.h                   | 316 ++++++++++++++++++
+>  include/uapi/linux/ctlv.h                     | 183 ++++++++++
+>  5 files changed, 558 insertions(+)
+>  create mode 100644 include/linux/ctlv.h
+>  create mode 100644 include/linux/ctlv_family.h
+>  create mode 100644 include/uapi/linux/ctlv.h
+>
+> diff --git a/Documentation/userspace-api/ioctl/ioctl-number.rst b/Documentation/userspace-api/ioctl/ioctl-number.rst
+> index 2fc53093752d..e545669c773c 100644
+> --- a/Documentation/userspace-api/ioctl/ioctl-number.rst
+> +++ b/Documentation/userspace-api/ioctl/ioctl-number.rst
+> @@ -386,6 +386,8 @@ Code  Seq#    Include File                                             Comments
+>                                                                         <mailto:linux-hyperv@vger.kernel.org>
+>  0xBA  00-0F  uapi/linux/liveupdate.h                                   Pasha Tatashin
+>                                                                         <mailto:pasha.tatashin@soleen.com>
+> +0xBB  00-0F  uapi/linux/ctlv.h                                         CTLV
+
+Only `0xBB` `0x00` is used by this series, yet the whole 00-0F range is reserved. Reserve what is used (00) or justify. The Comments column says just "CTLV"; other rows give a person or a subsystem. The mailto uses a different address than the author/SoB (resnulli.us vs nvidia.com).
+
+> +                                                                       <mailto:jiri@resnulli.us>
+>  0xC0  00-0F  linux/usb/iowarrior.h
+>  0xCA  00-0F  uapi/misc/cxl.h                                           Dead since 6.15
+>  0xCA  10-2F  uapi/misc/ocxl.h
+> diff --git a/MAINTAINERS b/MAINTAINERS
+> index 2c758d2607b6..1a7028427100 100644
+> --- a/MAINTAINERS
+> +++ b/MAINTAINERS
+> @@ -7008,6 +7008,8 @@ M:	Jiri Pirko <jiri@resnulli.us>
+>  L:	linux-kernel@vger.kernel.org
+>  S:	Maintained
+>  F:	Documentation/ctlv/
+> +F:	include/linux/ctlv*.h
+> +F:	include/uapi/linux/ctlv*.h
+>  F:	tools/ctlv/
+>  
+>  CTU CAN FD DRIVER
+> diff --git a/include/linux/ctlv.h b/include/linux/ctlv.h
+> new file mode 100644
+> index 000000000000..addb893f4b8d
+> --- /dev/null
+> +++ b/include/linux/ctlv.h
+> @@ -0,0 +1,55 @@
+> +/* SPDX-License-Identifier: GPL-2.0-only */
+
+`ctlv.h` is a header whose only content is `struct ctlv_cursor` plus forward declarations. Of the forward declarations, `ctlv_device`, `ctlv_family`, `ctlv_op_ctx` and `ctlv_schema_tree` are not used in this header at all except `ctlv_schema_tree` (in the cursor); `ctlv_device`/`ctlv_family`/`ctlv_op_ctx` are dead here. Only `ctlv_msg` and `ctlv_schema_tree` are needed. The file comment says "CTLV family API" but it contains no API, and there is also no declaration of the entry points families use (`ctlv_input_*`/`ctlv_output_*`, registration); those are presumably in `drivers/ctlv/*.h` or elsewhere, so "Add the in-kernel API used by family implementations" in the commit message overstates what is here.
+
+> +/*
+> + * Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES
+> + *
+> + * CTLV family API.
+> + */
+> +#ifndef _LINUX_CTLV_H
+> +#define _LINUX_CTLV_H
+> +
+> +#include <linux/types.h>
+> +
+> +#include <uapi/linux/ctlv.h>
+> +
+> +struct ctlv_device;
+
+`ctlv_device`, `ctlv_family`, `ctlv_op_ctx` are forward-declared but unused in this header (dead declarations). `ctlv_family.h` includes this header and then needs `struct ctlv_device`/`ctlv_op_ctx`; that header should declare what it needs itself rather than relying on this one.
+
+> +struct ctlv_family;
+> +struct ctlv_msg;
+> +struct ctlv_op_ctx;
+> +struct ctlv_schema_tree;
+> +
+> +/**
+> + * struct ctlv_cursor - One attr position in one message.
+
+kernel-doc: the description of @msg says "core-private bookkeeping" and `@index_scope` says "core-private", while the closing paragraph says all members belong to the core. If every member is core-private, `struct ctlv_cursor` should be opaque to families or have its internals in `drivers/ctlv/internal.h`; exposing up/start/tree/node/depth/`index_*_scope` in an installed-for-drivers header freezes layout details nobody outside the core may touch. "Fixed-size" is only needed so it can live on the stack; an opaque embedded blob (or sizing macro) would achieve that without exposing field names. @attr is documented as `NULL` "when a lookup found nothing" - a reader/writer dual use of one struct with four reading-only/writing-only fields (parent vs up/start) is a union candidate or two types.
+
+> + * @msg: the message this position is in, core-private bookkeeping
+> + * @attr: the attr itself, or NULL when a lookup found nothing
+> + * @parent: reading, the nest containing @attr, NULL at the root
+> + * @up: writing, cursor of the nest containing @attr, NULL at the root. The
+> + *	chain of them is the open-nest stack
+> + * @start: writing, where @attr begins in the message. An append reaches what
+> + *	it lengthens through the buffer rather than through @attr, that buffer
+> + *	being the core's own
+> + * @tree: schema tree the node belongs to, which is a fill's own tree for an
+> + *	attr that arrived through one
+> + * @node: index of the node within @tree
+> + * @depth: nesting levels above this position, the root being zero
+> + * @index_nest_scope: schema scope used to read members of the physical nest
+> + * @index_scope: core-private schema scope containing this attr
+> + *
+> + * Fixed-size, so family code can put a child cursor on the stack. The members
+
+The sentence "One direction at a time, a helper of the other direction refusing the cursor." is not a grammatical sentence and the kernel-doc blob is hard to parse in general. Rewrite in plain language.
+
+> + * belong to the core: a family reaches a message through what was generated
+> + * for the op it answers. One direction at a time, a helper of the other
+> + * direction refusing the cursor.
+> + */
+> +struct ctlv_cursor {
+> +	struct ctlv_msg *msg;
+> +	const struct ctlv_attr *attr;
+> +	const struct ctlv_attr *parent;
+> +	struct ctlv_cursor *up;
+
+`up` is a pointer to a caller-stack cursor (`struct ctlv_cursor *`) while the doc says nothing about lifetime: it is valid only while the child cursor is live on the same stack. Please document it, since the whole point is that families put children on the stack. Also nothing here enforces the depth limit against `CTLV_MAX_NEST_DEPTH` (depth is `u32` with 32 max): 32 * `sizeof(cursor)` (~72 bytes) = 2.3 KiB of stack in a recursive family; fine but should be called out.
+
+> +	size_t start;
+> +	const struct ctlv_schema_tree *tree;
+> +	u32 node;
+> +	u32 depth;
+> +	u32 index_nest_scope;
+> +	u32 index_scope;
+> +};
+> +
+> +#endif /* _LINUX_CTLV_H */
+> diff --git a/include/linux/ctlv_family.h b/include/linux/ctlv_family.h
+> new file mode 100644
+> index 000000000000..1ae4d3a536f7
+> --- /dev/null
+> +++ b/include/linux/ctlv_family.h
+> @@ -0,0 +1,316 @@
+> +/* SPDX-License-Identifier: GPL-2.0-only */
+> +/*
+> + * Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES
+> + *
+> + * CTLV family metadata and generated-code support.
+> + */
+> +#ifndef _LINUX_CTLV_FAMILY_H
+> +#define _LINUX_CTLV_FAMILY_H
+> +
+> +#include <linux/ctlv.h>
+> +#include <linux/gfp_types.h>
+> +#include <linux/kobject.h>
+> +#include <linux/types.h>
+> +
+> +#include <uapi/linux/ctlv.h>
+> +
+> +/* op-schema-get needs one level to describe the declared schema. */
+
+`CTLV_MAX_DECLARED_NEST_DEPTH` is defined in a family header but the UAPI comment for `CTLV_MAX_NEST_DEPTH` ("The root attr is at depth zero") does not mention that the declared schema is limited to one less. Userspace tools that build a schema-describing reply must know this; it is only visible via the kernel header, which is not UAPI. Consider documenting it in the ABI document (patch 4 does not mention it).
+
+> +#define CTLV_MAX_DECLARED_NEST_DEPTH (CTLV_MAX_NEST_DEPTH - 1)
+> +
+> +struct ctlv_node_schema {
+
+No kernel-doc on any of the structs in this header (`ctlv_node_schema`, `ctlv_stub_schema`, `ctlv_schema_tree`, `ctlv_op_sizes`, `ctlv_op_schema`, `ctlv_family_schema`, `ctlv_op`, `ctlv_family`, `ctlv_input_ref`, ...). This is the API family authors program against; the fields have non-obvious meanings: `max_occurrences`==0 means unlimited (only discoverable via `CTLV_NODE_SCHEMA_UNLIMITED` below), `first_child`/`children_count` index into the same `node_schemas` array, `required_children_count`, reenters, kind/unit/scale are bare `u8`/`s8` and not typed as `enum ctlv_schema_kind`/`ctlv_unit`. Use the enums (or at least comment) and add kernel-doc.
+
+> +	u64 attr_id;
+> +	u8 kind;
+> +	u8 unit;
+
+scale is `s8` with no documented range; unit is a raw `u8` rather than `enum ctlv_unit`.
+
+> +	s8 scale;
+> +	bool reenters;
+> +	u32 max_occurrences;
+> +	u32 first_child;
+> +	u32 children_count;
+> +	u32 required_children_count;
+> +	union {
+> +		struct {
+> +			u64 min;
+> +			u64 max;
+> +		} range;
+> +		u64 flags_mask;
+> +		struct {
+> +			u32 min_len;
+> +			u32 max_len;
+> +		} length;
+> +		struct {
+> +			u64 max_len;
+> +			u32 alignment;
+> +			u16 backings;
+> +			u8 direction;
+> +		} blob;
+> +	};
+> +};
+> +
+> +#define CTLV_NODE_SCHEMA_UNLIMITED 0
+
+`CTLV_NODE_SCHEMA_UNLIMITED` is the literal 0 in `max_occurrences`; since an initializer omitted field is also 0, "unlimited" is the default for a hand-written node that forgets the field. Consider making 0 invalid and an explicit value for unlimited, or at least document.
+
+> +
+> +#define __CTLV_NODE_SCHEMA(_attr, _kind, _occurrences, ...)	\
+
+`__CTLV_NODE_SCHEMA(_attr, _kind, _occurrences, ...)` is invoked with an empty `__VA_ARGS__` from `CTLV_NODE_SCHEMA_BOOL`; with `-Wpedantic` and C11 this is a constraint violation (needs at least one variadic arg). The kernel builds with -std=gnu11 so it works, but the trailing `, }` in the expansion for BOOL is an unnecessary subtlety; BOOL could just expand its own initializer.
+
+> +	{ .attr_id = (_attr), .kind = (_kind),			\
+> +	  .max_occurrences = (_occurrences), __VA_ARGS__ }
+> +
+> +#define __CTLV_NODE_SCHEMA_CHILDREN(_first, _count, _required)	\
+> +	.first_child = (_first), .children_count = (_count),	\
+> +	.required_children_count = (_required)
+> +
+> +#define CTLV_NODE_SCHEMA_ROOT(_first, _count, _required)	\
+> +	__CTLV_NODE_SCHEMA(CTLV_ATTR_ROOT, CTLV_SCHEMA_NEST, 1,	\
+> +			   __CTLV_NODE_SCHEMA_CHILDREN(_first, _count, _required))
+> +
+> +#define CTLV_NODE_SCHEMA_NEST(_attr, _occurrences, _first, _count, _required) \
+> +	__CTLV_NODE_SCHEMA(_attr, CTLV_SCHEMA_NEST, _occurrences,	\
+> +			   __CTLV_NODE_SCHEMA_CHILDREN(_first, _count, _required))
+> +
+> +#define CTLV_NODE_SCHEMA_NEST_REENTERS(_attr, _occurrences, _first, _count, _required) \
+> +	__CTLV_NODE_SCHEMA(_attr, CTLV_SCHEMA_NEST, _occurrences,	\
+> +			   .reenters = true,				\
+> +			   __CTLV_NODE_SCHEMA_CHILDREN(_first, _count, _required))
+> +
+> +#define CTLV_NODE_SCHEMA_UINT(_attr, _occurrences, _min, _max)	\
+> +	__CTLV_NODE_SCHEMA(_attr, CTLV_SCHEMA_UINT, _occurrences,	\
+> +			   .range = { .min = (_min), .max = (_max) })
+> +
+> +#define CTLV_NODE_SCHEMA_UINT_UNIT(_attr, _occurrences, _min, _max, _unit, _scale) \
+> +	__CTLV_NODE_SCHEMA(_attr, CTLV_SCHEMA_UINT, _occurrences,	\
+> +			   .range = { .min = (_min), .max = (_max) },	\
+> +			   .unit = (_unit), .scale = (_scale))
+> +
+> +#define CTLV_NODE_SCHEMA_SINT(_attr, _occurrences, _min, _max)	\
+> +	__CTLV_NODE_SCHEMA(_attr, CTLV_SCHEMA_SINT, _occurrences,	\
+> +			   .range = { .min = (_min), .max = (_max) })
+> +
+> +#define CTLV_NODE_SCHEMA_SINT_UNIT(_attr, _occurrences, _min, _max, _unit, _scale) \
+> +	__CTLV_NODE_SCHEMA(_attr, CTLV_SCHEMA_SINT, _occurrences,	\
+> +			   .range = { .min = (_min), .max = (_max) },	\
+> +			   .unit = (_unit), .scale = (_scale))
+> +
+> +#define CTLV_NODE_SCHEMA_ENUM(_attr, _occurrences, _max)	\
+
+`CTLV_NODE_SCHEMA_ENUM` hardcodes .range.min = 1: enum value 0 is therefore always invalid, but neither the UAPI doc for `CTLV_SCHEMA_ENUM` ("unsigned integer payload restricted to a range") nor the ABI document says that enum zero is reserved/invalid. That is a wire-visible rule and must be documented in the UAPI/ABI text; as written op-schema-get would report min=1 for enums, which is the only place userspace learns it.
+
+> +	__CTLV_NODE_SCHEMA(_attr, CTLV_SCHEMA_ENUM, _occurrences,	\
+> +			   .range = { .min = 1, .max = (_max) })
+> +
+> +#define CTLV_NODE_SCHEMA_FLAGS(_attr, _occurrences, _mask)	\
+> +	__CTLV_NODE_SCHEMA(_attr, CTLV_SCHEMA_FLAGS, _occurrences,	\
+> +			   .flags_mask = (_mask))
+> +
+> +#define CTLV_NODE_SCHEMA_BOOL(_attr, _occurrences)		\
+> +	__CTLV_NODE_SCHEMA(_attr, CTLV_SCHEMA_BOOL, _occurrences)
+> +
+> +#define CTLV_NODE_SCHEMA_STRING(_attr, _occurrences, _min, _max) \
+> +	__CTLV_NODE_SCHEMA(_attr, CTLV_SCHEMA_STRING, _occurrences,	\
+> +			   .length = { .min_len = (_min), .max_len = (_max) })
+> +
+> +#define CTLV_NODE_SCHEMA_BINARY(_attr, _occurrences, _min, _max) \
+> +	__CTLV_NODE_SCHEMA(_attr, CTLV_SCHEMA_BINARY, _occurrences,	\
+> +			   .length = { .min_len = (_min), .max_len = (_max) })
+> +
+> +#define CTLV_NODE_SCHEMA_BLOB(_attr, _occurrences, _max, _alignment, _backings, _dir) \
+> +	__CTLV_NODE_SCHEMA(_attr, CTLV_SCHEMA_BLOB, _occurrences,	\
+> +			   .blob = { .max_len = (_max),			\
+> +				     .alignment = (_alignment),		\
+> +				     .backings = (_backings),		\
+> +				     .direction = (_dir) })
+> +
+> +struct ctlv_stub_schema {
+
+`struct ctlv_stub_schema` / `ctlv_stub_fill_schema` / `ctlv_stub_ops` are introduced with no explanation of what a "stub" is anywhere in the headers or the commit message. The patch description needs a sentence about it (stub = a nest whose contents another family fills?), since 4 structs and 6 macros are built around it. Also `family_id` `u16` duplicates the ID encoding rather than a typedef.
+
+> +	u16 family_id;
+> +	u32 set_id;
+> +	u32 node;
+> +	bool optional;
+> +};
+> +
+> +#define __CTLV_STUB_SCHEMA(_family, _set, _node, _optional)	\
+> +	{ .family_id = (_family), .set_id = (_set),		\
+> +	  .node = (_node), .optional = (_optional) }
+> +
+> +#define CTLV_STUB_SCHEMA(_family, _set, _node)			\
+> +	__CTLV_STUB_SCHEMA(_family, _set, _node, false)
+> +
+> +#define CTLV_STUB_SCHEMA_OPTIONAL(_family, _set, _node)		\
+> +	__CTLV_STUB_SCHEMA(_family, _set, _node, true)
+> +
+> +struct ctlv_schema_tree {
+> +	const struct ctlv_node_schema *node_schemas;
+> +	u32 node_schemas_count;
+> +	const struct ctlv_stub_schema *stub_schemas;
+> +	u32 stub_schemas_count;
+> +};
+> +
+> +#define CTLV_SCHEMA_TREE(_name) {				\
+
+`CTLV_SCHEMA_TREE()` uses `ARRAY_SIZE()` but the header does not include `<linux/array_size.h>` (nor `<linux/stddef.h>`/`<linux/compiler.h>` for the generated designated-initializer use). A generated .c file that includes only `<linux/ctlv_family.h>` will fail to build if it does not itself pull in `ARRAY_SIZE`. Include what you use.
+
+> +	.node_schemas = _name##_node_schemas,			\
+> +	.node_schemas_count = ARRAY_SIZE(_name##_node_schemas),	\
+> +}
+> +
+> +#define CTLV_SCHEMA_TREE_STUBS(_name) {				\
+> +	.node_schemas = _name##_node_schemas,			\
+> +	.node_schemas_count = ARRAY_SIZE(_name##_node_schemas),	\
+> +	.stub_schemas = _name##_stub_schemas,			\
+> +	.stub_schemas_count = ARRAY_SIZE(_name##_stub_schemas),	\
+> +}
+> +
+> +#define CTLV_SCHEMA_TREE_NONE() { }
+
+`CTLV_SCHEMA_TREE_NONE()` is a function-like macro with no arguments for a constant `{ }`; a plain object-like macro (or just `{ }`) is simpler, and the generator needs to know to print the parentheses (`tools/ctlv/.../gen_kernel.py` emits `CTLV_SCHEMA_TREE_NONE()`). Cosmetic.
+
+> +
+> +struct ctlv_stub_fill_schema {
+> +	u16 family_id;
+> +	u32 set_id;
+> +	struct ctlv_schema_tree members;
+> +};
+> +
+> +#define CTLV_STUB_FILL_SCHEMA(_family, _set, _name) {		\
+> +	.family_id = (_family),					\
+> +	.set_id = (_set),					\
+> +	.members = CTLV_SCHEMA_TREE(_name##_fill),		\
+> +}
+> +
+> +struct ctlv_op_sizes {
+
+`struct ctlv_op_sizes` carries both `action_reply_max_len` and `query_reply_min_len`/`suggested_len`; each op type uses a disjoint subset. Fields not applicable are zero by designated init. A union per type would be the honest representation, or at least document the applicability. Also `request_max_len` etc. are `u32` while the ioctl `request_len` is `u32`: ok.
+
+> +	u32 request_max_len;
+> +	u32 action_reply_max_len;
+> +	u32 query_reply_min_len;
+> +	u32 query_reply_suggested_len;
+> +	u32 event_record_max_len;
+> +};
+> +
+> +struct ctlv_op_schema {
+
+`struct ctlv_op_schema`: `fd_access`, availability and type are bare `u8`. The values (`CTLV_OP_TYPE_*`, `CTLV_OP_AVAILABILITY_*`, fd-access constants) are not defined by this patch or by any header it includes; they come from the generated `<linux/ctlv_gen.h>` (patch 3). The macros below reference `CTLV_OP_TYPE_ACTION`, `CTLV_OP_TYPE_QUERY`, `CTLV_OP_TYPE_EVENT` and `CTLV_OP_AVAILABILITY_FIXED`, so this header is not usable on its own and a user must include the generated header first, in the right order. Either include `<linux/ctlv_gen.h>` here or document the requirement. Same for `CTLV_SCHEMA_NEST` etc. — those are fine (defined in the uapi header).
+
+> +	u64 op_id;
+> +	u8 type;
+> +	u8 fd_access;
+> +	u8 availability;
+> +	bool optional;
+
+bool `pre_post` duplicates what ops[i].pre/.post being non-`NULL` already says (`core.c` cross-checks them with `!entry->binding->pre != !op->pre_post`). Two sources of truth for one fact that need a runtime consistency check; consider deriving it. Same for `optional` versus availability.
+
+> +	bool pre_post;
+> +	struct ctlv_schema_tree request;
+> +	struct ctlv_schema_tree reply;
+> +	struct ctlv_op_sizes sizes;
+> +};
+> +
+> +#define __CTLV_OP_SCHEMA(_op, _type, _availability, ...)	\
+> +	{ .op_id = (_op), .type = (_type),			\
+> +	  .availability = (_availability), __VA_ARGS__ }
+> +
+> +#define CTLV_OP_SCHEMA_ACTION(_op, _access, _availability, _request_len, _reply_len, \
+
+`CTLV_OP_SCHEMA_ACTION`/QUERY take an `_access` argument but `CTLV_OP_SCHEMA_EVENT` does not set `fd_access`: documented in patch 4 ("Event entries have no fd-access field"), fine, but then the three macros take a trailing `...` that lets callers append arbitrary designated initializers (e.g. .optional = true, .`pre_post` = true) with no check; duplicate-designator overriding of .sizes etc. only triggers `-Woverride-init` which the kernel disables. Typed wrappers for optional/`pre_post` would be safer.
+
+> +			      _request, _reply, ...)			\
+> +	__CTLV_OP_SCHEMA(_op, CTLV_OP_TYPE_ACTION, _availability,	\
+> +			 .fd_access = (_access),			\
+> +			 .request = _request, .reply = _reply,		\
+> +			 .sizes = {					\
+> +				.request_max_len = (_request_len),	\
+> +				.action_reply_max_len = (_reply_len),	\
+> +			 },						\
+> +			 __VA_ARGS__)
+> +
+> +#define CTLV_OP_SCHEMA_QUERY(_op, _access, _availability, _request_len, _reply_min, \
+> +			     _reply_suggested, _request, _reply, ...)	\
+> +	__CTLV_OP_SCHEMA(_op, CTLV_OP_TYPE_QUERY, _availability,	\
+> +			 .fd_access = (_access),			\
+> +			 .request = _request, .reply = _reply,		\
+> +			 .sizes = {					\
+> +				.request_max_len = (_request_len),	\
+> +				.query_reply_min_len = (_reply_min),	\
+> +				.query_reply_suggested_len =		\
+> +					(_reply_suggested),		\
+> +			 },						\
+> +			 __VA_ARGS__)
+> +
+> +#define CTLV_OP_SCHEMA_EVENT(_op, _record_len, _reply, ...)	\
+> +	__CTLV_OP_SCHEMA(_op, CTLV_OP_TYPE_EVENT,		\
+> +			 CTLV_OP_AVAILABILITY_FIXED,			\
+> +			 .reply = _reply,				\
+> +			 .sizes = {					\
+> +				.event_record_max_len = (_record_len),	\
+> +			 },						\
+> +			 __VA_ARGS__)
+> +
+> +struct ctlv_family_schema {
+
+Document that `name` is used verbatim in the `CTLV_FAMILY=` uevent property and that its length and charset are constrained only by the generator's meta-schema (63 chars, `[a-z0-9-]`), not by this header.
+
+> +	const char *name;
+> +	u16 family_id;
+> +	const struct ctlv_op_schema *ops;
+> +	u32 ops_count;
+> +	const struct ctlv_stub_fill_schema *stub_fill_schemas;
+> +	u32 stub_fill_schemas_count;
+> +};
+> +
+> +/* Leave half of a uevent environment to the device model. */
+
+"half" is a policy number with no derivation: a family chain of depth N emits N+2 variables, and `CTLV_UEVENT_MAX_VARS` is checked after the fact in `core.c` with `>` while the `static_asserts` in the generated code use `<=`; make sure they agree on whether the limit is inclusive.
+
+Derive the limits instead of halving: reserve what the driver core adds around this callback (`ACTION`, `DEVPATH`, `SUBSYSTEM`, `MAJOR`, `MINOR`, `DEVNAME`, `DEVMODE`, `DEVUID`, `DEVGID`, `DEVTYPE`, `SEQNUM`, `HOME`, `PATH`) and give CTLV the rest. List those names in an enum ending in a count (`CTLV_UEVENT_CORE_VARS`), so the number cannot drift from the list, and define `CTLV_UEVENT_MAX_VARS` as `UEVENT_NUM_ENVP - CTLV_UEVENT_CORE_VARS`. The byte reserve cannot be counted (`DEVPATH` dominates), so it stays an estimate with a comment.
+
+Also cap the family inheritance depth in the meta-schema. Nothing limits it in patch 1, so the uevent limit is enforced only at registration with -E2BIG. With a cap the generator can `static_assert` the worst case (names of up to 63 characters, about 85 bytes per level) and the runtime check becomes a backstop.
+
+> +#define CTLV_UEVENT_MAX_LEN (UEVENT_BUFFER_SIZE / 2)
+> +#define CTLV_UEVENT_MAX_VARS (UEVENT_NUM_ENVP / 2)
+> +
+> +struct ctlv_input_ref {
+
+`struct ctlv_input_ref` has `kind` `u8` (raw), `slot` `u32` without documentation; it is passed by value into the core. A kernel-doc is needed. The struct is used only by core code (`drivers/ctlv/message.c`, `event.c`), so it does not belong in a family-facing header.
+
+> +	const struct ctlv_schema_tree *tree;
+> +	u64 attr_id;
+> +	u32 node;
+> +	u32 slot;
+> +	u8 kind;
+> +};
+> +
+> +typedef int (*ctlv_action_fn)(void *priv, struct ctlv_op_ctx *ctx,
+
+Kernel style discourages new function-pointer typedefs; use a plain `struct ctlv_op` with the pointers.
+
+> +			      const struct ctlv_cursor *request,
+> +			      struct ctlv_cursor *reply);
+> +typedef int (*ctlv_query_fn)(void *priv, struct ctlv_op_ctx *ctx,
+> +			     const struct ctlv_cursor *request,
+> +			     struct ctlv_cursor *reply);
+> +typedef int (*ctlv_op_pre_fn)(void *priv, struct ctlv_op_ctx *ctx);
+> +typedef void (*ctlv_op_post_fn)(void *priv, struct ctlv_op_ctx *ctx);
+> +
+> +struct ctlv_op {
+
+`struct ctlv_op` union { action; query; } plus pre/post: nothing marks which member is live; the core must read `op_schema->type`. Missing members for event ops (they have an entry in ops[] index space?) — check that ops[] is indexed in the same order as `schema->ops`, with `ops_count` == `schema->ops_count` and that `CTLV_OP_*` macros (which paste `_name`##`_action`, `_pre`, `_post`) are the only way to build it; that implicit naming contract is not documented.
+
+> +	union {
+> +		ctlv_action_fn action;
+> +		ctlv_query_fn query;
+> +	};
+> +	ctlv_op_pre_fn pre;
+> +	ctlv_op_post_fn post;
+> +};
+> +
+> +#define CTLV_OP_ACTION(_name) { .action = _name##_action }
+> +#define CTLV_OP_QUERY(_name) { .query = _name##_query }
+> +#define CTLV_OP_ACTION_PRE_POST(_name)				\
+> +	{ .action = _name##_action, .pre = _name##_pre,		\
+> +	  .post = _name##_post }
+> +#define CTLV_OP_QUERY_PRE_POST(_name)				\
+> +	{ .query = _name##_query, .pre = _name##_pre,		\
+> +	  .post = _name##_post }
+> +
+> +typedef size_t (*ctlv_family_priv_size_fn)(void);
+
+Seven typedefs for family lifetime callbacks, with no kernel-doc: call ordering, locking context and error semantics (is fini called when init failed? is `pre_fini` called for a family whose init never ran? what may `pre_init` do with `init_info`?) are undocumented. `priv_size` is a callback returning a `size_t` constant (called at `core.c`:292); a plain `size_t priv_size` field would be simpler. Please justify each of `pre_init`/`post_init`/`pre_fini` with a user in this series. Each typedef is used by exactly one struct member, so drop them and declare the pointers directly in the structs: the lifetime callbacks in `struct ctlv_family` and `ctlv_stub_fill_fn` in `struct ctlv_stub_ops`.
+
+> +typedef const void *(*ctlv_family_pre_init_fn)(const void *init_info);
+> +typedef int (*ctlv_family_init_fn)(struct ctlv_device *ctlvdev,
+> +				   const void *init_info, void *priv);
+> +typedef int (*ctlv_family_post_init_fn)(struct ctlv_device *ctlvdev,
+> +					void *priv);
+> +typedef void (*ctlv_family_pre_fini_fn)(struct ctlv_device *ctlvdev,
+> +					void *priv);
+> +typedef void (*ctlv_family_fini_fn)(struct ctlv_device *ctlvdev, void *priv);
+> +
+> +typedef int (*ctlv_stub_fill_fn)(void *priv, struct ctlv_op_ctx *ctx,
+> +				 const struct ctlv_cursor *request,
+> +				 struct ctlv_cursor *nest);
+> +
+> +struct ctlv_stub_ops {
+
+`struct ctlv_stub_ops`.fill duplicates the action/query signature (typedef `ctlv_stub_fill_fn`) with different param naming; third near-identical typedef.
+
+> +	u16 family_id;
+> +	u32 set_id;
+> +	ctlv_stub_fill_fn fill;
+> +};
+> +
+> +#define CTLV_STUB_OPS(_family, _set, _name) {			\
+> +	.family_id = (_family),					\
+> +	.set_id = (_set),					\
+> +	.fill = _name##_fill,					\
+> +}
+> +
+> +struct ctlv_family {
+> +	const struct ctlv_family_schema *schema;
+> +	const struct ctlv_family *parent;
+> +	const struct ctlv_op *ops;
+> +	u32 ops_count;
+> +	ctlv_op_pre_fn pre;
+> +	ctlv_op_post_fn post;
+> +	ctlv_family_priv_size_fn priv_size;
+> +	ctlv_family_pre_init_fn pre_init;
+> +	ctlv_family_init_fn init;
+> +	ctlv_family_post_init_fn post_init;
+> +	ctlv_family_pre_fini_fn pre_fini;
+> +	ctlv_family_fini_fn fini;
+> +	const struct ctlv_stub_ops *stub_ops;
+> +	u32 stub_ops_count;
+> +};
+> +
+> +extern const struct ctlv_family ctlv_family;
+
+`extern const struct ctlv_family ctlv_family;` : the variable has the same name as the struct tag, is the root family object exported by the generated `ctlv_gen.c` (`EXPORT_SYMBOL_NS_GPL(ctlv_family, "CTLV")`), but the global symbol name is not prefixed to distinguish it (every other family uses `ctlv_<name>_family`, e.g. `ctlv_attestation_family`). Name it `ctlv_root_family`. Also a header for a symbol exported in a namespace should note the namespace; importing modules need `MODULE_IMPORT_NS("CTLV")` and nothing documents that here.
+
+> +
+> +#endif /* _LINUX_CTLV_FAMILY_H */
+> diff --git a/include/uapi/linux/ctlv.h b/include/uapi/linux/ctlv.h
+> new file mode 100644
+> index 000000000000..6bc0d1a296e6
+> --- /dev/null
+> +++ b/include/uapi/linux/ctlv.h
+> @@ -0,0 +1,183 @@
+> +/* SPDX-License-Identifier: ((GPL-2.0 WITH Linux-syscall-note) OR BSD-3-Clause) */
+> +/*
+> + * Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES
+> + *
+> + * CTLV transport UAPI: the TLV wire format, the op-execution ioctl, the event
+> + * record header and transport limits. Schema-free; a family's constants
+> + * are generated into <linux/<family>_gen.h>, the root family's into
+> + * <linux/ctlv_gen.h>.
+> + */
+> +#ifndef _UAPI_LINUX_CTLV_H
+> +#define _UAPI_LINUX_CTLV_H
+> +
+> +#include <linux/ioctl.h>
+> +#include <linux/types.h>
+> +
+> +/**
+> + * struct ctlv_attr - Attr header.
+> + * @len: this header plus its payload, excluding this attr's trailing padding
+> + * @flags: CTLV_ATTR_F_* bits
+> + * @attr_id: complete attr ID, or CTLV_ATTR_ROOT for a message root
+> + *
+> + * Attrs are aligned to CTLV_ALIGNTO, which is why @attr_id is __aligned_u64: a
+
+The explanation is misleading: the layout (16 bytes, `attr_id` at offset 8) is the same on 32-bit ABIs, because `len` and `flags` already pad to 8. `__aligned_u64` only changes the structure's alignment (stack and array placement).
+
+State explicitly that the wire format is host-endian only: scalar payloads are native-endian and a reader cannot learn the producer's endianness, including for events `read()` from the fd.
+
+> + * 32-bit ABI would otherwise align this structure to four bytes. A nested
+> + * payload is the concatenation of CTLV_ALIGN(child.len) bytes per child, so
+> + * child padding counts inside the containing attr's @len while a leaf's own
+> + * padding does not. Scalar payloads are native-endian. Within each request
+> + * root or nest, occurrences of one @attr_id are contiguous; different IDs
+> + * otherwise have no required order.
+> + */
+> +struct ctlv_attr {
+> +	__u32 len;
+> +	__u32 flags;
+> +	__aligned_u64 attr_id;
+> +};
+> +
+> +#define CTLV_ALIGNTO 8
+> +#define CTLV_ALIGN(_len) (((_len) + CTLV_ALIGNTO - 1) & ~(CTLV_ALIGNTO - 1))
+
+`CTLV_ALIGN()` computes in the type of its argument, so for a `__u32` len near `U32_MAX` (e.g. `0xFFFFFFFF` from userspace) `len + 7` wraps and the result is 0. It is used to walk untrusted messages. Cast to `__u64` (or `size_t`) in the macro, or add a helper that fails on overflow; this is a UAPI macro, so it is awkward to fix later. Please also check that the in-kernel users widen first.
+
+> +
+> +/* Set exactly on root and nested attrs, clear on scalar attrs. */
+> +#define CTLV_ATTR_F_NESTED		(1U << 0)
+
+The header does not say that flag bits 3..31 are reserved and must be zero (patch 4 says "the header may carry no bit the format does not define"). State it here, with a `CTLV_ATTR_F_VALID_MASK`-like definition or a sentence, since future compatibility depends on it.
+
+> +/* Query fragments: set on the root and each nest logically open at the end. */
+> +#define CTLV_ATTR_F_FRAG_MORE		(1U << 1)
+> +/*
+
+Please state in the ABI doc (and in this header comment) that an ignored unknown nest is opaque: its own header is checked against the enclosing nest, its contents are not validated. Today that is only said in a comment in `drivers/ctlv/schema.c`.
+
+> + * A request attr, never the root, that a device whose schema does not declare
+> + * its ID skips whole instead of refusing the message. An ID that schema does
+> + * declare is held to it wherever it appears, so this asks to be forgiven what
+> + * this kernel has never heard of and nothing else.
+> + */
+> +#define CTLV_ATTR_F_IGNORE_IF_UNKNOWN	(1U << 2)
+> +
+> +/* Root attr: carries CTLV_ATTR_F_NESTED, valid only at a message start. */
+> +#define CTLV_ATTR_ROOT 0ULL
+
+The comment should say that complete ID 0 (family 0, group 0, attr 0) is reserved for the root attr and cannot be declared in a spec; generated attr numbers start at 1.
+
+> +
+> +/* Complete attr: family in bits 63..48, group in 47..32, attr in 31..0. */
+> +#define CTLV_ATTR(_family, _group, _attr)	\
+
+`CTLV_ATTR()` / `CTLV_OP()` do not mask their arguments: `(__u64)(_family) << 48` with `_family` > `0xFFFF`, or `(__u64)(_attr)` with a negative/sign-extended int, silently corrupts the higher fields. Mask each field: ((`__u64`)((`__u16`)(`_family`)) << 48) etc. since these are public macros used by userspace.
+
+> +	(((__u64)(_family) << 48) |		\
+> +	 ((__u64)(_group) << 32) |		\
+> +	 (__u64)(_attr))
+> +
+> +#define CTLV_ATTR_FAMILY(_attr)	((__u16)((_attr) >> 48))
+> +#define CTLV_ATTR_GROUP(_attr)	((__u16)((_attr) >> 32))
+> +#define CTLV_ATTR_NUMBER(_attr)	((__u32)(_attr))
+> +
+> +/* Complete op: family in bits 63..48, zero in 47..32, op in 31..0. */
+> +#define CTLV_OP(_family, _op)	\
+
+`CTLV_OP()` leaves bits 47..32 zero by construction, but `CTLV_OP_NUMBER()`/`CTLV_OP_FAMILY()` don't verify them; a caller handing an `op_id` with nonzero bits 47..32 is presumably rejected by the core. State in the comment that such an ID is invalid and what errno results (`-EOPNOTSUPP` or `-EINVAL`); the ABI document does not say either.
+
+> +	(((__u64)(_family) << 48) | (__u64)(_op))
+> +
+> +#define CTLV_OP_FAMILY(_op)		((__u16)((_op) >> 48))
+> +#define CTLV_OP_NUMBER(_op)		((__u32)(_op))
+> +
+> +/**
+
+`enum ctlv_unit` / `enum ctlv_schema_kind` are UAPI but the header does not give explicit numeric values for the "append-only" claim: `CTLV_UNIT_SECONDS` etc. rely on implicit enumeration. For wire-visible values write them explicitly (= 1, = 2, ...), as is done for `CTLV_UNIT_NONE` = 0. `enum ctlv_schema_kind` has no explicit value at all, including the first. The comment "Changing either is an ABI break" argues for explicit numbering.
+
+> + * enum ctlv_unit - CTLV-defined unit of an integer attr payload.
+> + * @CTLV_UNIT_NONE: dimensionless
+> + * @CTLV_UNIT_SECONDS: seconds
+> + * @CTLV_UNIT_HERTZ: hertz
+> + * @CTLV_UNIT_BYTES: bytes
+> + * @CTLV_UNIT_CELSIUS: degrees Celsius
+> + *
+> + * A payload is value * 10^scale of this unit, from the decimal scale the attr
+> + * declares alongside. Changing either is an ABI break.
+> + */
+> +enum ctlv_unit {
+> +	CTLV_UNIT_NONE = 0,
+> +	CTLV_UNIT_SECONDS,
+> +	CTLV_UNIT_HERTZ,
+> +	CTLV_UNIT_BYTES,
+> +	CTLV_UNIT_CELSIUS,
+> +};
+> +
+> +/**
+
+`enum ctlv_schema_kind`: `CTLV_SCHEMA_BLOB` is documented as "blob descriptor nest" and `CTLV_SCHEMA_NEST` as "nested payload"; but BLOB is a NEST on the wire. Say so, and that a reader treats BLOB as NESTED (flag set). Also the ENUM/FLAGS kinds say "unsigned integer payload" and UINT/SINT say "bounded by a range"; ENUM is 'restricted to a range' with implicit min 1 (see `ctlv_family.h`) which is not stated.
+
+> + * enum ctlv_schema_kind - CTLV-defined form of one attr payload.
+> + * @CTLV_SCHEMA_UINT: unsigned integer payload bounded by a range
+> + * @CTLV_SCHEMA_SINT: signed integer payload bounded by a range
+> + * @CTLV_SCHEMA_BOOL: one payload byte holding zero or one
+> + * @CTLV_SCHEMA_STRING: NUL-terminated string payload bounded by length
+> + * @CTLV_SCHEMA_BINARY: opaque payload bounded by length
+> + * @CTLV_SCHEMA_ENUM: unsigned integer payload restricted to a range
+> + * @CTLV_SCHEMA_FLAGS: unsigned integer payload restricted to a mask
+> + * @CTLV_SCHEMA_NEST: nested payload described by further nodes
+> + * @CTLV_SCHEMA_BLOB: blob descriptor nest
+> + *
+> + * Exactly one form applies to an attr. These are the values op-schema-get
+> + * reports, and the set is append-only.
+> + */
+> +enum ctlv_schema_kind {
+> +	CTLV_SCHEMA_UINT,
+> +	CTLV_SCHEMA_SINT,
+> +	CTLV_SCHEMA_BOOL,
+> +	CTLV_SCHEMA_STRING,
+> +	CTLV_SCHEMA_BINARY,
+> +	CTLV_SCHEMA_ENUM,
+> +	CTLV_SCHEMA_FLAGS,
+> +	CTLV_SCHEMA_NEST,
+> +	CTLV_SCHEMA_BLOB,
+> +};
+> +
+> +/**
+
+`struct ctlv_op_exec` doc: `@request_len` is `u32` so the `kernel_doc` says 'at least one root header' but also (per ABI doc) at most 1 MiB; the header never states the upper limit for this field nor what errno results. @generation and @cursor are in/out and @reserved must be zero, but `@op_id`/@request/@reply/`@request_len`/`@reply_len` are "in" only: since the ioctl is `_IOWR` the kernel copies the whole 64-byte struct back; say that only generation and cursor are modified. Also `__aligned_u64 request` holding a pointer: document that it is a plain user address with no tag/compat conversion (`u64_to_user_ptr`).
+
+> + * struct ctlv_op_exec - Op-execution ioctl argument.
+> + * @op_id: complete op ID; zero is invalid
+> + * @request: struct ctlv_attr __user *, the mandatory complete request root
+> + * @reply: struct ctlv_attr __user *, the success reply or the error
+> + *	information
+> + * @request_len: readable bytes beginning at @request, at least one root header;
+> + *	the transport copy boundary, which may exceed the root's own length
+> + * @reply_len: writable bytes beginning at @reply; input only, never
+> + *	overwritten by the kernel
+> + * @generation: query only; zero on a first fragment, the previously returned
+> + *	value on continuation, and the query generation on output. Actions must
+> + *	set zero.
+> + * @cursor: query only; zero starts a query and a nonzero value resumes it. On
+> + *	output it is the next cursor when the root carries
+> + *	CTLV_ATTR_F_FRAG_MORE and zero when no further fragment exists. Actions
+> + *	must set zero.
+> + * @reserved: must be zero
+> + *
+> + * No size field: the ioctl number encodes the structure size and @reserved
+> + * covers compatible growth. @request and @reply are fixed-width
+> + * representations of userspace pointers so that the compat layout is identical.
+
+Drop `reserved[]`: `_IOWR` encodes the structure size in the ioctl number, and a fixed 16-byte budget is arbitrary and is used up by the first extension. Let the kernel take the size from `_IOC_SIZE(cmd)`, as `PIDFD_GET_INFO` in `fs/pidfs.c` does, and copy the argument with `copy_struct_from_user()` (zero-extend a shorter struct, require zeros in a longer one's unknown tail). New fields are then appended and the ioctl number does not change.
+
+> + */
+> +struct ctlv_op_exec {
+> +	__aligned_u64 op_id;
+> +	__aligned_u64 request;
+> +	__aligned_u64 reply;
+> +	__u32 request_len;
+> +	__u32 reply_len;
+> +	__aligned_u64 generation;
+> +	__aligned_u64 cursor;
+> +	__aligned_u64 reserved[2];
+> +};
+> +
+> +#define CTLV_IOC_MAGIC 0xBB
+> +
+> +#define CTLV_IOC_OP_EXEC _IOWR(CTLV_IOC_MAGIC, 0x00, struct ctlv_op_exec)
+> +
+> +/**
+
+`struct ctlv_event_hdr` has no size or version field, so a reader can only find the root by assuming `sizeof(hdr)` == 24, and the header cannot grow compatibly. Either reserve space now or state that the root always begins at offset 24.
+
+> + * struct ctlv_event_hdr - Header of one queued event record.
+> + * @length: complete record length, this header plus the aligned root
+> + * @flags: must be zero
+> + * @op_id: complete op ID of the event op that produced the record
+> + * @sequence: per open file description sequence number, assigned to every
+> + *	eligible enqueue attempt including dropped ones
+> + *
+> + * Exactly one root attr follows the header, and one read() returns one record.
+> + */
+> +struct ctlv_event_hdr {
+> +	__u32 length;
+> +	__u32 flags;
+> +	__aligned_u64 op_id;
+> +	__aligned_u64 sequence;
+> +};
+> +
+> +/* Implementation limits, not wire-field maxima: raising them is compatible. */
+
+Document `CTLV_DEFAULT_QUERY_REPLY_LEN` and `CTLV_MAX_ERROR_LEN` in this header (their meaning is only in the yaml today), or define them only where needed. "Raising them is compatible" holds for the kernel, but userspace that sized a buffer to these constants at build time may truncate once a limit is raised; say to query `ops-dump` for the bound.
+
+> +
+> +/* Request roots, action replies, query reply fragments and event roots. */
+> +#define CTLV_MAX_INLINE_MESSAGE_LEN	0x100000	/* 1 MiB */
+
+Hex literal plus comment (`0x100000` /* 1 MiB */); (1U << 20) or `SZ_1M`-style is more readable. Minor.
+
+> +/* Includes the error information root. */
+> +#define CTLV_MAX_ERROR_LEN		0x4000		/* 16 KiB */
+> +/* The root attr is at depth zero. */
+> +#define CTLV_MAX_NEST_DEPTH		32
+> +#define CTLV_DEFAULT_QUERY_REPLY_LEN	0x10000		/* 64 KiB */
+> +#define CTLV_MAX_EVENT_QUEUE_LEN	0x1000000	/* 16 MiB */
+> +
+> +#endif /* _UAPI_LINUX_CTLV_H */
+> -- 
+> 2.55.0
+>
+
+Summary for 0002 (header-only; unused and not buildable on its own until patch 3):
+
+1. `CTLV_ALIGN()` is evaluated in the argument's type and wraps for a `u32` length near `U32_MAX` (returns 0; the kernel itself uses ALIGN((`size_t`)len) so only userspace/latent users are exposed); `CTLV_ATTR()`/`CTLV_OP()` do not mask fields. These are public UAPI macros so they cannot be fixed later.
+2. Wire-visible enums (`ctlv_unit`, `ctlv_schema_kind`) rely on implicit numbering while claiming ABI stability; enum min=1 rule (ENUM zero invalid) is undocumented in UAPI/ABI doc; reserved flag bits not stated.
+3. `ctlv_family.h` is not self-contained: uses `ARRAY_SIZE` without `<linux/array_size.h>`, relies on `CTLV_OP_TYPE_*`/`CTLV_OP_AVAILABILITY_*` from the generated header (patch 3), `kobject.h` pulled only for two constants.
+4. Core-private types (`ctlv_cursor` internals, `ctlv_input_ref`) and redundant API (`ctlv_action_fn` == `ctlv_query_fn`, `pre_post` bool duplicating pre/post pointers, unused forward declarations) exposed in family-facing headers; no kernel-doc on any family API struct.
+5. The root family object is named plain `ctlv_family` (other families use `ctlv_<name>_family`) and its NS import requirement is undocumented.
+6. Commit message overstates ("in-kernel API") and does not explain stubs; ioctl-number reserves 00-0F for one ioctl and uses a different email than the SoB.

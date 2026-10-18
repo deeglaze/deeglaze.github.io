@@ -1,0 +1,202 @@
+{
+ "patch": 8,
+ "title": "ctlv: Prepare message output handling",
+ "overview": "Adds the schema-aware reply builder: the put and nest helpers that family code uses to write output attributes, plus operation error reporting and query fragment completion. builder.c is the implementation, builder.h exposes only the init hook to the core, and ctlv.h and ctlv_family.h carry the public and family-facing declarations and generator macros. The builder checks every write against the reply schema and poisons the message on misuse.",
+ "files": [
+  {
+   "path": "drivers/ctlv/Makefile",
+   "purpose": "Kbuild fragment for the ctlv module object.",
+   "units": [
+    {
+     "title": "Build builder.o into ctlv.o",
+     "kind": "build",
+     "start": 32,
+     "end": 33,
+     "anchor": "ctlv-y += blob_desc.o",
+     "summary": "Adds builder.o to the ctlv-y object list."
+    }
+   ]
+  },
+  {
+   "path": "drivers/ctlv/builder.c",
+   "purpose": "Implements reply construction against a schema tree: writing scalar, string and binary attributes, opening and closing nests, recording operation errors, and completing query fragments. Called by family operation handlers (through the exported helpers and the generated wrappers) and initialized by the dispatch code (patches 10 and 12).",
+   "units": [
+    {
+     "title": "Header, includes and forward declaration",
+     "kind": "section",
+     "start": 40,
+     "end": 63,
+     "anchor": "// SPDX-License-Identifier: GPL-2.0-only",
+     "summary": "License, includes and a forward declaration of the fragment-marking helper."
+    },
+    {
+     "title": "ctlv_message_output_init()",
+     "kind": "function",
+     "start": 65,
+     "end": 80,
+     "anchor": "void ctlv_message_output_init(",
+     "summary": "Initializes an output message over a caller buffer and writes the empty root attribute.",
+     "details": "The root is a nested attribute of length equal to its own header; it grows as attributes are appended. Called by the dispatch code to set up `ctx->output` for replies, event records and error info."
+    },
+    {
+     "title": "Poison and readiness checks",
+     "kind": "function",
+     "start": 82,
+     "end": 103,
+     "anchor": "/* The first thing that went wrong",
+     "summary": "Records the first failure on the message and gates every write on the message being an output, unpoisoned, with the cursor at the deepest open nest.",
+     "details": "- `ctlv_message_output_poison()` keeps only the first error in `msg->poison`.\n- `ctlv_message_output_ready()` requires `msg->ctx->deepest == nest`, so only the innermost open nest can be written to."
+    },
+    {
+     "title": "ctlv_message_output_member() and _full()",
+     "kind": "function",
+     "start": 105,
+     "end": 140,
+     "anchor": "/* What the schema places in this nest",
+     "summary": "Looks up the schema node for an attribute ID in the current nest and checks its kind; separately classifies running out of room.",
+     "details": "- Lookup goes through `ctlv_schema_member()`; a miss or a kind mismatch warns and poisons with -EINVAL.\n- For a query, a full buffer just ends the fragment; for other ops it warns and poisons with -EMSGSIZE."
+    },
+    {
+     "title": "Cursor attr accessor and ctlv_message_output_write()",
+     "kind": "function",
+     "start": 142,
+     "end": 181,
+     "anchor": "/* What one cursor stands on",
+     "summary": "Appends one attribute at the end of the current nest, padded to alignment, and lengthens every enclosing nest.",
+     "details": "- Fails without writing if the aligned attribute would not fit in `msg->len`.\n- Writes header, payload and zero pad.\n- Non-nested writes set `frag.progress`, which query completion later requires.\n- Walks `open->up` to the root adding the step to each nest's length."
+    },
+    {
+     "title": "Scalar and bool put helpers",
+     "kind": "function",
+     "start": 183,
+     "end": 219,
+     "anchor": "/* The 64-bit payload that every integer",
+     "summary": "Exported ctlv_put_u64/s64/bool, with u64 and s64 sharing one scalar path that checks the value against the node's declared range.",
+     "details": "Scalars are stored as a 64-bit payload after `ctlv_schema_value_ok()`; booleans are one byte. These are the targets of the generated `_put()` wrappers."
+    },
+    {
+     "title": "String and binary put helpers",
+     "kind": "function",
+     "start": 221,
+     "end": 249,
+     "anchor": "bool ctlv_put_string(",
+     "summary": "Exported ctlv_put_string() and ctlv_put_binary(), which check length limits against the node schema before writing.",
+     "details": "Strings are written with their NUL terminator, bounded by `length.max_len`. Binary data uses `ctlv_schema_length_ok()`."
+    },
+    {
+     "title": "ctlv_nest_start() and ctlv_nest_end()",
+     "kind": "function",
+     "start": 251,
+     "end": 298,
+     "anchor": "bool ctlv_nest_start(",
+     "summary": "Opens a nested attribute and a child cursor linked to its parent, and closes it by popping `ctx->deepest`.",
+     "details": "- Start writes an empty nested attr, fills the child cursor with the schema position from the lookup, and makes it `ctx->deepest`.\n- End requires that the child still be the deepest; an empty nest counts as progress for fragment purposes."
+    },
+    {
+     "title": "Operation error helpers",
+     "kind": "function",
+     "start": 300,
+     "end": 328,
+     "anchor": "static bool ctlv_op_error_valid(",
+     "summary": "ctlv_op_error() and ctlv_op_errorf() record the first error message for the op and return the (validated) negative errno.",
+     "details": "An error outside the negative errno range is replaced with -EINVAL. Only the first message is kept in `ctx->error.message`."
+    },
+    {
+     "title": "Query continuation accessors",
+     "kind": "function",
+     "start": 330,
+     "end": 350,
+     "anchor": "/* Continuation is a query's",
+     "summary": "Expose the generation and cursor a continuation request supplied, valid only for query ops."
+    },
+    {
+     "title": "ctlv_query_fragment_end()",
+     "kind": "function",
+     "start": 352,
+     "end": 374,
+     "anchor": "/*",
+     "summary": "Common ending checks for a query fragment: query op, single ending, no output poison, and an unchanged generation on continuation.",
+     "details": "A generation mismatch against a nonzero cursor sets a stale-generation reason and expected/current generations in `ctx->error` and returns -ESTALE. Otherwise the generation is stored in `frag.reported`."
+    },
+    {
+     "title": "ctlv_op_query_more() and ctlv_op_query_done()",
+     "kind": "function",
+     "start": 376,
+     "end": 404,
+     "anchor": "int ctlv_op_query_more(",
+     "summary": "Finish a fragment either with a next cursor (more data) or as the last fragment.",
+     "details": "- `more` requires progress and a nonzero next cursor different from the input, then marks open nests via `ctlv_message_output_frag_mark()` and stores `frag.next_cursor`.\n- `done` requires that all nests have been closed (`deepest` is the root cursor).\n- Both record the result in `frag.result`."
+    },
+    {
+     "title": "ctlv_message_output_frag_mark()",
+     "kind": "function",
+     "start": 406,
+     "end": 413,
+     "anchor": "static void ctlv_message_output_frag_mark(",
+     "summary": "Sets the more-fragments flag on every still-open nest and resets the deepest cursor to the root."
+    }
+   ]
+  },
+  {
+   "path": "drivers/ctlv/builder.h",
+   "purpose": "Private header giving the core access to the output initializer, with forward declarations only.",
+   "units": [
+    {
+     "title": "ctlv_message_output_init() declaration",
+     "kind": "function",
+     "start": 420,
+     "end": 433,
+     "anchor": "/* SPDX-License-Identifier: GPL-2.0-only */",
+     "summary": "Declares the output init function used by the dispatch code."
+    }
+   ]
+  },
+  {
+   "path": "include/linux/ctlv.h",
+   "purpose": "Public header for operation handlers; this patch adds the nest-end, error and query-completion API.",
+   "units": [
+    {
+     "title": "ctlv_nest_end, ctlv_op_error and ctlv_op_errorf declarations",
+     "kind": "doc",
+     "start": 442,
+     "end": 467,
+     "anchor": "/**",
+     "summary": "Kerneldoc declarations for closing a nest and for recording an operation error message.",
+     "details": "`ctlv_op_errorf()` is annotated `__printf(3, 4)`."
+    },
+    {
+     "title": "Query continuation API",
+     "kind": "doc",
+     "start": 469,
+     "end": 511,
+     "anchor": "/*",
+     "summary": "Documents the stateless query continuation model and declares the generation, cursor, more and done functions.",
+     "details": "A continuation repeats the request with the previous generation and cursor; it fails with -ESTALE if the generation changed. Each fragment must complete a logical leaf and return a cursor different from its input."
+    }
+   ]
+  },
+  {
+   "path": "include/linux/ctlv_family.h",
+   "purpose": "Family-facing header used by generated code and handlers; this patch adds the output declarations and the macros that generate typed put and nest-start wrappers.",
+   "units": [
+    {
+     "title": "Put and nest-start declarations",
+     "kind": "function",
+     "start": 522,
+     "end": 530,
+     "anchor": "bool ctlv_put_u64(",
+     "summary": "Declares the generic put helpers and ctlv_nest_start() implemented in builder.c."
+    },
+    {
+     "title": "Generated put and nest-start macros",
+     "kind": "macro",
+     "start": 532,
+     "end": 561,
+     "anchor": "#define __CTLV_DEFINE_PUT(",
+     "summary": "Macros that generate typed `_name_put()` and `_name_start()` inline wrappers binding an attribute ID and kind to the generic helpers.",
+     "details": "`CTLV_PUT_U64/S64/BOOL/STRING` share `__CTLV_DEFINE_PUT`; `CTLV_PUT_BINARY` and `CTLV_NEST_START` have their own signatures. The generated family headers instantiate these per attribute."
+    }
+   ]
+  }
+ ]
+}

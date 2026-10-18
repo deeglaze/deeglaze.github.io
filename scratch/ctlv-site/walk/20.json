@@ -1,0 +1,159 @@
+{
+ "patch": 20,
+ "title": "attestation: Add the TDX family implementation",
+ "overview": "Implements the TDX attestation provider as a module that registers as a client of the native tdx-guest service (patch 18) and creates a ctlv-attestation-tdx instance per TDX device. It plugs MR descriptions, evidence formats and read/extend callbacks into the base attestation core (patches 15-17) and supplies the hooks declared by the generated TDX family files (patch 19). Kconfig, Makefile and documentation wire it into the build.",
+ "files": [
+  {
+   "path": "Documentation/driver-api/attestation.rst",
+   "purpose": "Driver-API documentation for the attestation framework.",
+   "units": [
+    {
+     "title": "TDX provider section",
+     "kind": "doc",
+     "start": 30,
+     "end": 44,
+     "anchor": "TDX provider",
+     "summary": "Documents MR ID numbering, supported evidence formats and that only <linux/tdx-guest.h> is consumed."
+    }
+   ]
+  },
+  {
+   "path": "drivers/attestation/Kconfig",
+   "purpose": "Kconfig for the attestation subsystem.",
+   "units": [
+    {
+     "title": "ATTESTATION_TDX option",
+     "kind": "config",
+     "start": 54,
+     "end": 66,
+     "anchor": "if ATTESTATION",
+     "summary": "Tristate option depending on TDX_GUEST_DRIVER, grouped under ATTESTATION."
+    }
+   ]
+  },
+  {
+   "path": "drivers/attestation/Makefile",
+   "purpose": "Build rules for the attestation core and providers.",
+   "units": [
+    {
+     "title": "attestation-tdx module",
+     "kind": "build",
+     "start": 76,
+     "end": 79,
+     "anchor": "obj-$(CONFIG_ATTESTATION_TDX)",
+     "summary": "Builds attestation-tdx.ko from the provider source and the generated TDX family source."
+    }
+   ]
+  },
+  {
+   "path": "drivers/attestation/providers/tdx.c",
+   "purpose": "TDX provider: describes the TDX registers and evidence, delegates native work to `struct tdx_guest_ops`, and implements the hooks required by the generated family descriptor. Instances are created and destroyed via the tdx_guest client add/remove callbacks.",
+   "units": [
+    {
+     "title": "Header, includes and state",
+     "kind": "struct",
+     "start": 86,
+     "end": 105,
+     "anchor": "// SPDX-License-Identifier",
+     "summary": "Includes and the init-info and per-instance state structs.",
+     "details": "`attestation_tdx_init_info` is passed to ctlv_create(); `struct attestation_tdx` is the family priv holding the parent device and native ops."
+    },
+    {
+     "title": "MR algorithm and descriptor table",
+     "kind": "const",
+     "start": 107,
+     "end": 159,
+     "anchor": "static const enum hash_algo",
+     "summary": "Describes MRTD (ID 0, read-only) and RTMR0-3 (IDs 1-4, readable and extendable), all SHA-384.",
+     "details": "Register index is set only for RTMRs; the IDs are what userspace uses."
+    },
+    {
+     "title": "Evidence objects and caps",
+     "kind": "const",
+     "start": 161,
+     "end": 181,
+     "anchor": "static const struct attestation_evidence_supported_object",
+     "summary": "Declares the tdx-tdreport-1.0 and tdx-quote-1.0 formats, both binding MRs, and a fixed-size REPORTDATA challenge.",
+     "details": "Sizes come from TDX_GUEST_* constants in tdx-guest.h."
+    },
+    {
+     "title": "attestation_tdx_evidence_get()",
+     "kind": "function",
+     "start": 183,
+     "end": 219,
+     "anchor": "static int",
+     "summary": "Gets one TDREPORT or Quote into a temporary buffer and copies it into the reply blob.",
+     "details": "Accepts exactly one object; picks report_get or quote_get by comparing the supported_object pointer; writes via ctlv_blob_write() and records the length; the buffer is freed on every path."
+    },
+    {
+     "title": "attestation_tdx_mr_read()",
+     "kind": "function",
+     "start": 221,
+     "end": 239,
+     "anchor": "static int attestation_tdx_mr_read(",
+     "summary": "Maps a provider MR ID to the native TDX register and reads its SHA-384 value.",
+     "details": "Rejects out-of-range IDs and anything but a single SHA-384 value."
+    },
+    {
+     "title": "attestation_tdx_mr_extend()",
+     "kind": "function",
+     "start": 241,
+     "end": 254,
+     "anchor": "static int",
+     "summary": "Extends RTMR0-3 (IDs 1-4) through the native rtmr_extend op using ID minus one.",
+     "details": "MRTD (ID 0) is not extendable and yields -EOPNOTSUPP."
+    },
+    {
+     "title": "Provider table",
+     "kind": "const",
+     "start": 256,
+     "end": 263,
+     "anchor": "static const struct attestation_provider",
+     "summary": "Provider vtable and static data consumed by the base attestation family."
+    },
+    {
+     "title": "Family priv lifecycle hooks",
+     "kind": "function",
+     "start": 265,
+     "end": 290,
+     "anchor": "size_t ctlv_attestation_tdx_priv_size",
+     "summary": "Core-called hooks: priv size, pre_init returning the provider table, init capturing device and ops, empty fini.",
+     "details": "pre_init supplies the provider before the base family's init runs; init validates the init info."
+    },
+    {
+     "title": "Op pre/post hooks",
+     "kind": "function",
+     "start": 292,
+     "end": 300,
+     "anchor": "int ctlv_attestation_tdx_op_pre",
+     "summary": "Forward family-wide op hooks to the base attestation implementation on the parent priv via ctlv_priv_parent()."
+    },
+    {
+     "title": "ctlv_attestation_tdx_device_info_fill()",
+     "kind": "function",
+     "start": 302,
+     "end": 322,
+     "anchor": "int ctlv_attestation_tdx_device_info_fill(",
+     "summary": "Fills the base device-info reply with mrconfigid, mrowner and mrownerconfig from the native info.",
+     "details": "Returns -ENODEV without native info and -EMSGSIZE if any put fails; uses generated put helpers."
+    },
+    {
+     "title": "tdx_guest client glue",
+     "kind": "function",
+     "start": 324,
+     "end": 344,
+     "anchor": "static void *attestation_tdx_add",
+     "summary": "The add callback creates the CTLV device with ctlv_create(); remove calls ctlv_destroy(); both are registered as a tdx_guest_client."
+    },
+    {
+     "title": "Module init and metadata",
+     "kind": "function",
+     "start": 346,
+     "end": 362,
+     "anchor": "static int __init attestation_tdx_init_module",
+     "summary": "Registers and unregisters the tdx_guest client and declares module metadata and namespace imports."
+    }
+   ]
+  }
+ ]
+}

@@ -1,0 +1,662 @@
+Hi Jiri,
+
+Comments on 9/20 below.
+
+> From a4577293fdf8263879e2e9706ff23811e9d42a30 Mon Sep 17 00:00:00 2001
+> From: Jiri Pirko <jiri@nvidia.com>
+> Date: Thu, 15 Oct 2026 16:50:42 +0200
+> Subject: [PATCH 09/20] ctlv: Prepare VA blob handling
+>
+> Add task-bound VA blob resolution and CPU read/write access for CTLV
+> families.
+>
+> The blob object can be compile-checked individually. CONFIG_CTLV remains
+
+The `ctlv_blob_context_*()` helpers and everything exported here have no caller until `core.c` is added later in the series; fine for bisection since nothing is wired up, but the commit message should say what is exercised.
+
+> unwired until device dispatch completes the module.
+>
+> Assisted-by: Cursor: GPT-5.6 Sol
+> Assisted-by: Cursor: Claude Opus 5.5
+> Signed-off-by: Jiri Pirko <jiri@nvidia.com>
+> ---
+>  drivers/ctlv/Makefile       |   2 +-
+>  drivers/ctlv/blob.c         | 355 ++++++++++++++++++++++++++++++++++++
+>  drivers/ctlv/blob.h         |  15 ++
+>  drivers/ctlv/internal.h     |   8 +
+>  include/linux/ctlv.h        |  41 +++++
+>  include/linux/ctlv_family.h |  23 +++
+>  6 files changed, 443 insertions(+), 1 deletion(-)
+>  create mode 100644 drivers/ctlv/blob.c
+>  create mode 100644 drivers/ctlv/blob.h
+>
+> diff --git a/drivers/ctlv/Makefile b/drivers/ctlv/Makefile
+> index e1a22a199ef1..4455062f83d7 100644
+> --- a/drivers/ctlv/Makefile
+> +++ b/drivers/ctlv/Makefile
+> @@ -1,4 +1,4 @@
+>  # SPDX-License-Identifier: GPL-2.0
+>  obj-$(CONFIG_CTLV) += ctlv.o
+>  
+> -ctlv-y += blob_desc.o builder.o message.o schema.o
+> +ctlv-y += blob.o blob_desc.o builder.o message.o schema.o
+> diff --git a/drivers/ctlv/blob.c b/drivers/ctlv/blob.c
+> new file mode 100644
+> index 000000000000..2c93da62b201
+> --- /dev/null
+> +++ b/drivers/ctlv/blob.c
+> @@ -0,0 +1,355 @@
+> +// SPDX-License-Identifier: GPL-2.0-only
+> +/*
+> + * Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES
+> + *
+> + * Blob backing is acquired lazily in the submitting task and held until put.
+
+"Lazily" is inaccurate/misleading: the pin is taken at `ctlv_blob_resolve()` time, i.e. when the family asks for the blob, not when it first reads/writes it. Please also state the lifetime rule (all blobs are force-put by `ctlv_blob_context_finish()` at end of the op).
+
+> + */
+> +#include <linux/align.h>
+
+`<linux/align.h>` and `<linux/bits.h>` are not used in this file (no ALIGN/`IS_ALIGNED`/BIT). `<linux/list.h>` is used but only arrives through `internal.h`; include it explicitly.
+
+> +#include <linux/atomic.h>
+> +#include <linux/bits.h>
+> +#include <linux/capability.h>
+> +#include <linux/ctlv.h>
+> +#include <linux/err.h>
+> +#include <linux/errno.h>
+> +#include <linux/highmem.h>
+> +#include <linux/limits.h>
+> +#include <linux/minmax.h>
+> +#include <linux/mm.h>
+> +#include <linux/mm_types.h>
+> +#include <linux/overflow.h>
+> +#include <linux/sched.h>
+> +#include <linux/sched/mm.h>
+> +#include <linux/sched/signal.h>
+> +#include <linux/slab.h>
+> +#include <linux/types.h>
+> +
+> +#include <uapi/linux/ctlv.h>
+> +#include <uapi/linux/ctlv_gen.h>
+> +
+> +#include "blob.h"
+> +#include "blob_desc.h"
+> +#include "internal.h"
+> +#include "message.h"
+> +
+> +struct ctlv_blob {
+> +	u64 len;
+> +	u8 direction;
+> +	u8 type;
+> +	struct ctlv_op_ctx *ctx;
+> +	struct list_head entry;
+
+`blob->ctx` is the only back-pointer, and `ctlv_blob_same_task()`/`ctlv_blob_access_live()` both test `!blob->ctx`. ctx is non-`NULL` from `ctlv_blob_resolve()` until put, so those branches are only reachable for a half-initialised blob that no caller can see. Remove the dead conditions (and `!blob->ctx->submitter`, which `resolve()` has already ruled out) to make the invariant (ctx != `NULL`, submitter != `NULL`) obvious.
+
+> +	union {
+> +		struct {
+
+A union containing one anonymous struct, a `u8` type field, a switch(`blob->type`) with one case, and a "default: return `-EINVAL`" in `copy()`: speculative generality for blob types that do not exist. Worse, it is inconsistent: `ctlv_blob_acquire()` calls `ctlv_blob_va_acquire()` unconditionally without looking at desc type, so adding a second type would silently pin it as VA. Either dispatch on the type in `acquire()` as well, or drop the union/type until a second type exists.
+
+> +			struct mm_struct *mm;
+> +			struct page **pages;
+> +			unsigned long pages_count;
+> +			u32 start;
+> +		} va;
+> +	};
+> +};
+> +
+> +static bool ctlv_blob_readable(const struct ctlv_blob *blob)
+> +{
+> +	return blob->direction != CTLV_BLOB_DIRECTION_OUTPUT;
+> +}
+> +
+> +static bool ctlv_blob_writable(const struct ctlv_blob *blob)
+> +{
+> +	return blob->direction != CTLV_BLOB_DIRECTION_INPUT;
+> +}
+> +
+> +static bool ctlv_blob_same_task(const struct ctlv_blob *blob)
+> +{
+> +	return !blob->ctx || !blob->ctx->submitter || blob->ctx->submitter == current;
+> +}
+> +
+> +static bool ctlv_blob_access_live(const struct ctlv_blob *blob)
+
+The `!blob->ctx ||` test is dead (see above).
+
+> +{
+> +	return ctlv_blob_same_task(blob) && (!blob->ctx || blob->ctx->blobs_live);
+> +}
+> +
+> +/*
+> + * Charged against RLIMIT_MEMLOCK of the address space the pages came from. A
+> + * pin lasts one op, which is why it is not FOLL_LONGTERM.
+> + */
+> +static int ctlv_blob_pin_charge(struct mm_struct *mm, unsigned long pages_count)
+> +{
+> +	unsigned long limit = rlimit(RLIMIT_MEMLOCK) >> PAGE_SHIFT;
+> +
+> +	if (atomic64_add_return(pages_count, &mm->pinned_vm) > limit && !capable(CAP_IPC_LOCK)) {
+
+Two changes requested.
+
+1. `mm->pinned_vm` is shared with every other pinner in the process (`io_uring`, vfio, RDMA), so a process near its limit through those gets `-ENOMEM` here, and `ctlv_blob_context_fail()` then reports it to userspace as `CTLV_VALIDATION_REASON_BAD_BLOB_DESCRIPTOR`. Report a charge failure with its own reason, or document that it is reported as a bad descriptor.
+2. Add a comment above `ctlv_blob_pin_charge()` saying that reading `rlimit()` once and charging `pinned_vm` without `mmap_lock` is deliberate, and why it does not use `__account_locked_vm()`, which does the same under the lock for `locked_vm`.
+
+> +		atomic64_sub(pages_count, &mm->pinned_vm);
+> +		return -ENOMEM;
+> +	}
+> +	return 0;
+> +}
+> +
+> +static int ctlv_blob_va_range(u64 address, u64 len, unsigned long *first_page,
+> +			      unsigned long *pages_count)
+> +{
+> +	unsigned long first, last, span, count;
+> +	size_t bytes;
+> +	u64 end;
+> +
+> +	if (!len)
+> +		return -EINVAL;
+> +	if (check_add_overflow(address, len, &end) || end > TASK_SIZE)
+
+On arm64 with tagged pointers the top-byte tag in @address makes end > `TASK_SIZE`, so tagged pointers are rejected, whereas gup would untag them. Use `untagged_addr()` or document that tagged addresses are not accepted.
+
+> +		return -EFAULT;
+> +
+> +	/* Bounded by an unsigned long above, so nothing below loses a bit. */
+> +	first = (unsigned long)address & PAGE_MASK;
+> +	last = ((unsigned long)end - 1) & PAGE_MASK;
+> +	if (check_sub_overflow(last, first, &span) ||
+
+Drop the three overflow checks and `bytes`. `end <= TASK_SIZE` already bounds everything below: `last >= first`, so the subtraction cannot underflow; `span >> PAGE_SHIFT` is below `ULONG_MAX`, so adding 1 cannot wrap; and `count * sizeof(struct page *)` cannot overflow because `PAGE_SIZE` is much larger than a pointer (`kvmalloc_array()` checks its own multiplication anyway). The function reduces to the `TASK_SIZE` check and `*pages_count = ((last - first) >> PAGE_SHIFT) + 1`.
+
+> +	    check_add_overflow(span >> PAGE_SHIFT, 1UL, &count) ||
+> +	    check_mul_overflow(count, sizeof(struct page *), &bytes))
+> +		return -EFAULT;
+> +
+> +	*first_page = first;
+> +	*pages_count = count;
+> +	return 0;
+> +}
+> +
+> +static int ctlv_blob_va_acquire(struct ctlv_blob *blob, u64 address)
+> +{
+> +	unsigned long pinned = 0, first, pages_count;
+> +	unsigned int gup_flags = 0;
+> +	struct page **pages;
+> +	int ret;
+> +
+> +	/* Before charging or allocating, both of which this sizes. */
+
+Charge `RLIMIT_MEMLOCK` before allocating. `kvmalloc_array(pages_count, ...)` runs first, and `pages_count` comes from a user-supplied length bounded only by the schema's blob `max_len`, so an unprivileged caller can trigger a huge allocation and a `warn_alloc()` splat before the limit rejects it. Call `ctlv_blob_pin_charge()` first, then allocate with `__GFP_NOWARN`; this also simplifies the `err_free_pages`/`err_unpin` unwinding.
+
+> +	ret = ctlv_blob_va_range(address, blob->len, &first, &pages_count);
+> +	if (ret)
+> +		return ret;
+> +
+> +	pages = kvmalloc_array(pages_count, sizeof(*pages), GFP_KERNEL_ACCOUNT);
+
+See above: allocate after the charge, and with `__GFP_NOWARN` since the size is user-influenced.
+
+> +	if (!pages)
+> +		return -ENOMEM;
+> +
+> +	if (ctlv_blob_writable(blob))
+> +		gup_flags |= FOLL_WRITE;
+> +	ret = ctlv_blob_pin_charge(current->mm, pages_count);
+> +	if (ret)
+> +		goto err_free_pages;
+> +
+> +	while (pinned < pages_count) {
+> +		long got = pin_user_pages_fast(first + (pinned << PAGE_SHIFT),
+
+Three changes requested.
+
+1. Remove the `INT_MAX` `min_t`: it is unreachable, since a page array of 2^31 entries would be 16 GiB.
+2. Check `fatal_signal_pending(current)` on each iteration (and fail with `-EINTR` through `err_unpin`), so pinning a very large blob can be interrupted.
+3. Pass `FOLL_LONGTERM` in `gup_flags`, or justify why not. The comment above `ctlv_blob_pin_charge()` says a pin lasts one op, but an op can block for a long time (an attestation call), so "one op" is not a bound the core controls.
+
+> +					       min_t(unsigned long, pages_count - pinned, INT_MAX),
+> +					       gup_flags, pages + pinned);
+> +
+> +		/* A short pin is progress; nothing pinned is the caller's. */
+> +		if (got <= 0) {
+> +			ret = got ? (int)got : -EFAULT;
+> +			goto err_unpin;
+> +		}
+> +		pinned += got;
+> +	}
+> +
+> +	/* Referenced, so the unpin is safe however far the submitter got. */
+> +	mmgrab(current->mm);
+> +	blob->va.start = offset_in_page(address);
+> +	blob->va.mm = current->mm;
+> +	blob->va.pages = pages;
+> +	blob->va.pages_count = pages_count;
+> +	return 0;
+> +
+> +	/* The pins taken, and the whole charge, which covered every page. */
+> +err_unpin:
+> +	unpin_user_pages(pages, pinned);
+> +	atomic64_sub(pages_count, &current->mm->pinned_vm);
+> +err_free_pages:
+> +	kvfree(pages);
+> +	return ret;
+> +}
+> +
+> +static void ctlv_blob_va_release(struct ctlv_blob *blob)
+> +{
+> +	/* Dirtied, so that what the kernel wrote survives the unpin. */
+> +	unpin_user_pages_dirty_lock(blob->va.pages, blob->va.pages_count, ctlv_blob_writable(blob));
+> +	atomic64_sub(blob->va.pages_count, &blob->va.mm->pinned_vm);
+> +	kvfree(blob->va.pages);
+> +	mmdrop(blob->va.mm);
+> +}
+> +
+> +static void ctlv_blob_va_copy(struct ctlv_blob *blob, u64 offset, void *buf, size_t len, bool write)
+
+A bool "write" argument threaded through three layers (copy -> `range_ok` -> `va_copy`) with a branch at each level; two small read/write helpers would be simpler. `ctlv_blob_write()` also has to cast away const on @src to fit this scheme: `(void *)src` is a const-correctness hole waiting for someone to memcpy into it.
+
+> +{
+> +	u64 at = blob->va.start + offset;
+> +	unsigned long index = at >> PAGE_SHIFT;
+> +	u32 in_page = offset_in_page(at);
+> +	u8 *bytes = buf;
+> +
+> +	while (len) {
+> +		struct page *page = blob->va.pages[index++];
+> +		size_t step = min_t(size_t, len, PAGE_SIZE - in_page);
+> +
+> +		if (write)
+> +			memcpy_to_page(page, in_page, bytes, step);
+> +		else
+> +			memcpy_from_page(bytes, page, in_page, step);
+> +		bytes += step;
+> +		len -= step;
+> +		in_page = 0;
+> +	}
+> +}
+> +
+> +u64 ctlv_blob_len(const struct ctlv_blob *blob)
+> +{
+> +	return blob->len;
+> +}
+> +EXPORT_SYMBOL_NS_GPL(ctlv_blob_len, "CTLV");
+> +
+> +/*
+> + * The length, the direction and addressing from zero are all the family's own
+> + * to know, so getting one wrong is a kernel bug rather than a caller's.
+> + */
+> +static bool ctlv_blob_range_ok(struct ctlv_blob *blob, u64 offset, size_t len, bool write)
+> +{
+> +	u64 end;
+> +
+> +	if (WARN_ON_ONCE(write ? !ctlv_blob_writable(blob) : !ctlv_blob_readable(blob)))
+> +		return false;
+> +	if (WARN_ON_ONCE(!ctlv_blob_access_live(blob)))
+> +		return false;
+> +	if (WARN_ON_ONCE(check_add_overflow(offset, (u64)len, &end) || end > blob->len))
+
+These are all `WARN_ON_ONCE` on conditions that depend on the family's computations. If a family derives offset/len from request data it is a user-triggerable WARN (`panic_on_warn`). A plain `-EINVAL`/`-ERANGE` for the range case would be more appropriate; reserve WARN for the direction check.
+
+> +		return false;
+> +	return true;
+> +}
+> +
+> +static int ctlv_blob_copy(struct ctlv_blob *blob, u64 offset, void *buf, size_t len, bool write)
+> +{
+> +	if (!ctlv_blob_range_ok(blob, offset, len, write))
+> +		return -EINVAL;
+> +	if (!len)
+> +		return 0;
+> +
+> +	switch (blob->type) {
+> +	case CTLV_BLOB_TYPE_VA:
+> +		ctlv_blob_va_copy(blob, offset, buf, len, write);
+> +		return 0;
+> +	default:
+> +		return -EINVAL;
+> +	}
+> +}
+> +
+> +int ctlv_blob_read(struct ctlv_blob *blob, u64 offset, void *dst, size_t len)
+> +{
+> +	return ctlv_blob_copy(blob, offset, dst, len, false);
+> +}
+> +EXPORT_SYMBOL_NS_GPL(ctlv_blob_read, "CTLV");
+> +
+> +int ctlv_blob_write(struct ctlv_blob *blob, u64 offset, const void *src, size_t len)
+> +{
+> +	return ctlv_blob_copy(blob, offset, (void *)src, len, true);
+> +}
+> +EXPORT_SYMBOL_NS_GPL(ctlv_blob_write, "CTLV");
+> +
+> +int ctlv_blob_put(struct ctlv_blob *blob)
+
+Returns int, but the only failure is the same-task WARN, after which the pinned pages, the `pinned_vm` charge and the mm reference are leaked (the blob stays on the list). Callers cannot do anything useful with the value. Make it void, or make the cross-task put legal (the pin does not depend on current: `ctlv_blob_va_release()` uses `blob->va`.mm, which is why the mmgrab exists), so that the `same_task` test can go. As written the mmgrab reference is justified by exactly the scenario that `put()` then forbids.
+
+> +{
+> +	if (!blob)
+> +		return 0;
+> +	if (WARN_ON_ONCE(!ctlv_blob_same_task(blob)))
+> +		return -EINVAL;
+> +
+> +	switch (blob->type) {
+> +	case CTLV_BLOB_TYPE_VA:
+> +		ctlv_blob_va_release(blob);
+> +		break;
+> +	}
+> +	if (blob->ctx) {
+
+`blob->ctx` is never `NULL` here, see above; the unconditional `list_del()` suffices.
+
+> +		list_del(&blob->entry);
+> +		blob->ctx = NULL;
+> +	}
+> +	kfree(blob);
+> +	return 0;
+> +}
+> +EXPORT_SYMBOL_NS_GPL(ctlv_blob_put, "CTLV");
+> +
+> +void ctlv_blob_context_init(struct ctlv_op_ctx *ctx)
+> +{
+> +	INIT_LIST_HEAD(&ctx->blobs);
+> +	ctx->blobs_live = true;
+> +	ctx->blob_error = 0;
+> +}
+> +
+> +void ctlv_blob_context_track(struct ctlv_blob *blob, struct ctlv_op_ctx *ctx)
+
+Only called from `ctlv_blob_resolve()` in this file, yet it is non-static and declared in `blob.h`. Make it static (and drop the declaration), or just fold it into `resolve()`.
+
+> +{
+> +	blob->ctx = ctx;
+> +	list_add_tail(&blob->entry, &ctx->blobs);
+> +}
+> +
+> +int ctlv_blob_context_finish(struct ctlv_op_ctx *ctx)
+
+`ctx->blob_error` is initialised to 0 in `context_init()` and written only here (to `-EINVAL`). Nothing else in the series sets it (grep: `blob.c` only), so the field and the `&& !ctx->blob_error` test are a mechanism without a producer. Either remove it and return `-EINVAL` directly when blobs leaked, or document who sets it.
+
+The drain loop below spins forever if `ctlv_blob_put()` fails to remove the entry, which it does when called from a task other than `ctx->submitter`. `core.c` currently calls this from the submitter, but nothing here enforces it. Use `list_for_each_entry_safe()` with an internal put that cannot fail.
+
+> +{
+> +	ctx->blobs_live = false;
+> +	if (WARN_ON_ONCE(!list_empty(&ctx->blobs)) && !ctx->blob_error)
+> +		ctx->blob_error = -EINVAL;
+> +	while (!list_empty(&ctx->blobs)) {
+> +		struct ctlv_blob *blob = list_first_entry(&ctx->blobs, struct ctlv_blob, entry);
+> +
+> +		ctlv_blob_put(blob);
+> +	}
+> +	return ctx->blob_error;
+> +}
+> +
+> +/*
+> + * Which of an op's blobs was the unusable one, in the shape validation would
+> + * have used. The errno the family returns says what went wrong.
+> + */
+> +static void ctlv_blob_context_fail(struct ctlv_op_ctx *ctx, const struct ctlv_cursor *cursor)
+> +{
+> +	if (ctx->error.reason)
+> +		return;
+> +	ctx->error = (struct ctlv_error){
+
+This assignment replaces the whole struct, including a message the family may already have set with `ctlv_op_error()` (the guard tests only ->reason, and `ctlv_op_error()` leaves reason 0). Set the three fields individually instead of clobbering. Also this fires for every acquire failure, so `-ENOMEM` from the pin charge or `-EFAULT` from an unmapped range is reported to userspace as `CTLV_VALIDATION_REASON_BAD_BLOB_DESCRIPTOR`; an unmapped address is arguably that, a charge failure is not.
+
+> +		.reason = CTLV_VALIDATION_REASON_BAD_BLOB_DESCRIPTOR,
+> +		.bad_attr_offset = ctlv_message_offset(cursor->msg, cursor->attr),
+> +		.nest_offset = ctlv_message_offset(cursor->msg, cursor->parent),
+> +	};
+> +}
+> +
+> +static struct ctlv_blob *ctlv_blob_acquire(const struct ctlv_blob_desc *desc, u8 direction)
+
+`desc->member[CTLV_BLOB_MEMBER_TYPE]` is stored but never consulted to choose the backend, see the union comment above. Also the extra layer (acquire + `va_acquire` + `va_range`) is three functions for one pin.
+
+> +{
+> +	u64 address = desc->member[CTLV_BLOB_MEMBER_ADDRESS];
+> +	u64 len = desc->member[CTLV_BLOB_MEMBER_LENGTH];
+> +	struct ctlv_blob *blob;
+> +	int ret;
+> +
+> +	blob = kzalloc_obj(*blob, GFP_KERNEL_ACCOUNT);
+> +	if (!blob)
+> +		return ERR_PTR(-ENOMEM);
+> +	INIT_LIST_HEAD(&blob->entry);
+> +	blob->len = len;
+> +	blob->direction = direction;
+> +	blob->type = desc->member[CTLV_BLOB_MEMBER_TYPE];
+> +
+> +	ret = ctlv_blob_va_acquire(blob, address);
+> +	if (ret) {
+> +		kfree(blob);
+> +		return ERR_PTR(ret);
+> +	}
+> +	return blob;
+> +}
+> +
+> +struct ctlv_blob *ctlv_blob_resolve(struct ctlv_op_ctx *ctx, const struct ctlv_cursor *blob)
+
+Declared immediately above `#define __CTLV_DEFINE_PUT` with no blank line, in the block of output (put) helpers although it is an input-side API; place it next to the `CTLV_IN_*` macros with a blank line and kernel-doc.
+
+
+No kernel-doc for the exported `ctlv_blob_resolve()` (it is declared in `ctlv_family.h` without a comment), including the `ERR_PTR` contract, the fact that it must be called in the submitting task, and the lifetime (released by `ctlv_blob_put()` or at the end of the op).
+
+> +{
+> +	const struct ctlv_attr *bad = NULL;
+
+"bad" is written by `ctlv_blob_desc_read()` and never read here. If the parameter is mandatory, fine; otherwise allow `NULL`.
+
+> +	const struct ctlv_node_schema *node;
+> +	struct ctlv_blob_desc desc;
+> +	struct ctlv_blob *acquired;
+> +
+> +	/* An absent blob, or a cursor from some other execution entirely. */
+
+`WARN_ON_ONCE` on !`ctlv_attr_ok()` makes an absent optional blob a WARN. With `CTLV_IN_BLOB` (which does `ctlv_input_attr()` then resolves unconditionally) a family that does not test presence first lets userspace trigger the splat just by omitting an optional blob attribute; `CTLV_IN_EACH_BLOB`, by contrast, returns `ERR_PTR(-EINVAL)` quietly via `ctlv_input_cursor()`. Return `-ENOENT` for an absent attribute without a WARN and reserve the WARN for the foreign-cursor case.
+
+> +	if (WARN_ON_ONCE(blob->msg != &ctx->request || !ctlv_attr_ok(blob)))
+> +		return ERR_PTR(-EINVAL);
+> +	node = &blob->tree->node_schemas[blob->node];
+> +	if (WARN_ON_ONCE(node->kind != CTLV_SCHEMA_BLOB))
+> +		return ERR_PTR(-EINVAL);
+> +	if (WARN_ON_ONCE(!ctx->blobs_live || !ctx->submitter || ctx->submitter != current))
+> +		return ERR_PTR(-EINVAL);
+> +	/* Validated before the callback, so anything wrong with it is a bug. */
+> +	if (WARN_ON_ONCE(ctlv_blob_desc_read(blob->attr, &desc, &bad) ||
+> +			 ctlv_blob_desc_check(&desc, node)))
+> +		return ERR_PTR(-EINVAL);
+> +
+> +	acquired = ctlv_blob_acquire(&desc, node->blob.direction);
+> +	if (IS_ERR(acquired))
+> +		ctlv_blob_context_fail(ctx, blob);
+> +	else
+> +		ctlv_blob_context_track(acquired, ctx);
+> +	return acquired;
+> +}
+> +EXPORT_SYMBOL_NS_GPL(ctlv_blob_resolve, "CTLV");
+> diff --git a/drivers/ctlv/blob.h b/drivers/ctlv/blob.h
+> new file mode 100644
+> index 000000000000..bb7b933a1ced
+> --- /dev/null
+> +++ b/drivers/ctlv/blob.h
+> @@ -0,0 +1,15 @@
+> +/* SPDX-License-Identifier: GPL-2.0-only */
+> +#ifndef _CTLV_BLOB_H
+> +#define _CTLV_BLOB_H
+> +
+> +#include <linux/types.h>
+> +
+> +struct ctlv_blob;
+
+Kernel-doc for `ctlv_blob_put()` should say `NULL` is accepted (the code returns 0) and that the blob must be put by the submitting task.
+
+> +struct ctlv_op_ctx;
+> +
+> +void ctlv_blob_context_init(struct ctlv_op_ctx *ctx);
+
+`blob.h`: `ctlv_blob_context_track()` should not be here (see above).
+
+> +void ctlv_blob_context_track(struct ctlv_blob *blob,
+> +			     struct ctlv_op_ctx *ctx);
+> +int ctlv_blob_context_finish(struct ctlv_op_ctx *ctx);
+> +
+> +#endif /* _CTLV_BLOB_H */
+> diff --git a/drivers/ctlv/internal.h b/drivers/ctlv/internal.h
+> index 7d2b43857299..f74724269628 100644
+> --- a/drivers/ctlv/internal.h
+> +++ b/drivers/ctlv/internal.h
+> @@ -8,12 +8,15 @@
+>  #define _CTLV_INTERNAL_H
+>  
+>  #include <linux/ctlv_family.h>
+> +#include <linux/list.h>
+>  #include <linux/types.h>
+>  
+>  #include <uapi/linux/ctlv.h>
+>  
+>  #include "message.h"
+>  
+> +struct task_struct;
+> +
+>  #define CTLV_ERROR_MESSAGE_LEN 256
+>  
+>  /* An op that is always enabled has no per-device availability state. */
+> @@ -50,6 +53,8 @@ struct ctlv_query_fragment {
+>  
+>  struct ctlv_op_ctx {
+>  	const struct ctlv_family *family;
+> +	/* Compared against current and never followed: identity, not a hold. */
+> +	const struct task_struct *submitter;
+
+Comment is OK, but the field is now trusted for authorization-like decisions (`same_task`); note it is assigned in `core.c`'s `ctlv_op_exec()` only. Other ctx constructors (`event.c` builds ctx for event ops, error-info path) leave it `NULL`, in which case `ctlv_blob_resolve()` always fails the WARN. Is that intended?
+
+>  	const struct ctlv_op_entry *op;
+>  
+>  	struct ctlv_msg request;
+> @@ -60,6 +65,9 @@ struct ctlv_op_ctx {
+>  	struct ctlv_cursor *deepest;
+>  
+>  	struct ctlv_query_fragment frag;
+> +	struct list_head blobs;
+> +	bool blobs_live;
+> +	int blob_error;
+
+See `ctlv_blob_context_finish()`: no producer. Also three new loose fields (list, bool, int) would be tidier as a small `struct ctlv_blobs`.
+
+>  	struct ctlv_error error;
+>  };
+>  
+> diff --git a/include/linux/ctlv.h b/include/linux/ctlv.h
+> index 45f0c53b56ea..dd2206cccfb5 100644
+> --- a/include/linux/ctlv.h
+> +++ b/include/linux/ctlv.h
+> @@ -123,4 +123,45 @@ int ctlv_op_query_more(struct ctlv_op_ctx *ctx, u64 generation,
+>   */
+>  int ctlv_op_query_done(struct ctlv_op_ctx *ctx, u64 generation);
+>  
+> +struct ctlv_blob;
+> +
+> +/**
+> + * ctlv_blob_put - Release a resolved blob.
+> + * @blob: blob returned by a generated resolve helper
+> + *
+> + * Return: 0, or a negative error.
+> + */
+> +int ctlv_blob_put(struct ctlv_blob *blob);
+> +
+> +/**
+> + * ctlv_blob_len - Get a resolved blob's length.
+> + * @blob: resolved blob
+> + *
+> + * Return: blob length in bytes.
+> + */
+> +u64 ctlv_blob_len(const struct ctlv_blob *blob);
+> +
+> +/**
+> + * ctlv_blob_read - Copy bytes from a resolved input blob.
+> + * @blob: resolved blob
+> + * @offset: byte offset
+> + * @dst: destination buffer
+> + * @len: number of bytes
+> + *
+> + * Return: 0, or a negative error.
+> + */
+> +int ctlv_blob_read(struct ctlv_blob *blob, u64 offset, void *dst, size_t len);
+> +
+> +/**
+> + * ctlv_blob_write - Copy bytes to a resolved output blob.
+> + * @blob: resolved blob
+> + * @offset: byte offset
+> + * @src: source buffer
+> + * @len: number of bytes
+> + *
+> + * Return: 0, or a negative error.
+> + */
+> +int ctlv_blob_write(struct ctlv_blob *blob, u64 offset, const void *src,
+> +		    size_t len);
+> +
+>  #endif /* _LINUX_CTLV_H */
+> diff --git a/include/linux/ctlv_family.h b/include/linux/ctlv_family.h
+> index d2598ec686f1..5cdcdfeec651 100644
+> --- a/include/linux/ctlv_family.h
+> +++ b/include/linux/ctlv_family.h
+> @@ -336,6 +336,8 @@ bool ctlv_put_binary(struct ctlv_cursor *nest, u64 attr_id, u8 kind,
+>  bool ctlv_nest_start(struct ctlv_cursor *nest, struct ctlv_cursor *child,
+>  		     u64 attr_id, u8 kind);
+>  
+> +struct ctlv_blob *ctlv_blob_resolve(struct ctlv_op_ctx *ctx,
+> +				    const struct ctlv_cursor *blob);
+>  #define __CTLV_DEFINE_PUT(_name, _type, _put_fn, _attr_id, _kind) \
+>  static inline bool _name##_put(struct ctlv_cursor *nest,		\
+>  			       _type value)			\
+> @@ -448,6 +450,17 @@ static inline void _name##_get(struct ctlv_cursor *nested,	\
+>  	ctlv_input_attr(nested, nest, _name##_ref());		\
+>  }
+>  
+> +#define CTLV_IN_BLOB(_name)					\
+> +static inline struct ctlv_blob *				\
+> +_name##_resolve(struct ctlv_op_ctx *ctx,			\
+> +		const struct ctlv_cursor *nest)			\
+> +{								\
+> +	struct ctlv_cursor attr;				\
+> +								\
+> +	ctlv_input_attr(&attr, nest, _name##_ref());		\
+> +	return ctlv_blob_resolve(ctx, &attr);			\
+
+`CTLV_IN_BLOB` passes the cursor even when `ctlv_input_attr()` found nothing, unlike `CTLV_IN_EACH_BLOB` which checks `ctlv_input_cursor()` first; the two generated flavours behave differently for absent blobs (WARN vs `ERR_PTR`). Also these macros use `ERR_PTR()` but `ctlv_family.h` does not include `<linux/err.h>` (only via `kobject.h`).
+
+> +}
+> +
+>  #define CTLV_IN_EACH_U64(_name)					\
+>  static inline u64 _name##_get(const struct ctlv_cursor *attr)	\
+>  {								\
+> @@ -492,4 +505,14 @@ _name##_get(const struct ctlv_cursor *attr, u32 *len)		\
+>  	return ctlv_attr_binary(attr, len);			\
+>  }
+>  
+> +#define CTLV_IN_EACH_BLOB(_name)				\
+> +static inline struct ctlv_blob *				\
+> +_name##_resolve(struct ctlv_op_ctx *ctx,			\
+> +		const struct ctlv_cursor *attr)			\
+> +{								\
+> +	if (!ctlv_input_cursor(attr, _name##_ref()))		\
+> +		return ERR_PTR(-EINVAL);				\
+> +	return ctlv_blob_resolve(ctx, attr);			\
+> +}
+> +
+>  #endif /* _LINUX_CTLV_FAMILY_H */
+> -- 
+> 2.55.0
+>
+
+Summary of the most serious issues in 9/20:
+- `ctlv_blob_context_finish()`: the drain loop spins forever if `ctlv_blob_put()` ever fails (it returns `-EINVAL` without unlinking when the task differs), and `ctlv_blob_put()`'s return value is otherwise meaningless.
+- `ctx->blob_error` is never set to anything but 0 (or `-EINVAL` in finish itself): a dead field/mechanism. Several !`blob->ctx` / !submitter branches are dead because `resolve()` already guarantees both.
+- `ctlv_blob_va_acquire()`: comment says "before charging or allocating", but the `kvmalloc_array()` of a schema-sized page array happens before the `RLIMIT_MEMLOCK` charge; charge first. Also redundant overflow checks in `ctlv_blob_va_range()`, speculative union/type-switch generality while `acquire()` hardcodes VA.
+- `ctlv_blob_context_track()` is exported through `blob.h` but only used in `blob.c`; unused includes; a blob resolved from an absent optional attr WARNs (user-triggerable if the family does not guard).
+- `ctlv_blob_context_fail()` wipes `ctx->error` (including a message set via `ctlv_op_error()`) and reports `-ENOMEM`/pin failures as `BAD_BLOB_DESCRIPTOR`.

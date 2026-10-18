@@ -1,0 +1,335 @@
+{
+ "patch": 10,
+ "title": "ctlv: Prepare event queue support",
+ "overview": "Adds the event half of the core: per-open subscriptions, bounded per-file event queues with loss reporting, and event creation/emission for families. event.c implements it on top of builder/message/schema; device.h introduces the device fields it locks and counts under, and the root family's subscription and queue actions declared in the generated root bindings (patch 3) get their implementations here. Device dispatch (patch 12) calls the lifecycle hooks (sizes, init, contexts start/stop/wait, file init/exit, read/poll, device_dead).",
+ "files": [
+  {
+   "path": "drivers/ctlv/Makefile",
+   "purpose": "Kbuild list for the ctlv module object.",
+   "units": [
+    {
+     "title": "Add event.o to ctlv-y",
+     "kind": "build",
+     "start": 37,
+     "end": 38,
+     "anchor": "ctlv-y",
+     "summary": "Links event.o into the ctlv module."
+    }
+   ]
+  },
+  {
+   "path": "drivers/ctlv/device.h",
+   "purpose": "Defines `struct ctlv_device`, the per-device object that dispatch registers and the event code locks. Introduced here so event.c can compile before dispatch exists.",
+   "units": [
+    {
+     "title": "struct ctlv_device",
+     "kind": "struct",
+     "start": 45,
+     "end": 82,
+     "anchor": "SPDX-License-Identifier",
+     "summary": "The device: embedded `struct device`, bound family, op table, and the event bookkeeping guarded by `events_lock`.",
+     "details": "- `files` lists every open `struct ctlv_file`; `events_live` gates new event contexts; `active_event_contexts` plus `event_context_wait` let teardown wait for in-flight events.\n- `dead_announced` is set once device-removed records are queued.\n- `overflow_op` / `removed_op` are the two root event ops every device has.\n- `queue_min`, `queue_reserved`, `queue_default` are byte sizes computed by `ctlv_event_sizes()`."
+    }
+   ]
+  },
+  {
+   "path": "drivers/ctlv/event.c",
+   "purpose": "Per-open event queues and loss reporting. Events are built into an op context, validated, copied once per subscribed file under `events_lock`, and read back through read()/poll(); each file reserves records for overflow and device-removed markers so those can always be delivered. Also implements the root family's subscription and queue-size ops.",
+   "units": [
+    {
+     "title": "Header, includes, layout asserts",
+     "kind": "section",
+     "start": 89,
+     "end": 123,
+     "anchor": "SPDX-License-Identifier",
+     "summary": "License, includes, and static asserts that the event header and root form one contiguous aligned copy range."
+    },
+    {
+     "title": "ctlv_event_sizes()",
+     "kind": "function",
+     "start": 125,
+     "end": 158,
+     "anchor": "static u32 ctlv_event_len(",
+     "summary": "Scans the device's event ops to find the largest event record, the overflow and removed ops, and derives the queue min, reserved and default sizes.",
+     "details": "`queue_reserved` is the space for one overflow plus one removed record; `queue_min` adds the largest event; the result must fit `CTLV_MAX_EVENT_QUEUE_LEN`. Called once at device registration."
+    },
+    {
+     "title": "Device init and event-context gate",
+     "kind": "function",
+     "start": 160,
+     "end": 193,
+     "anchor": "void ctlv_event_device_init(",
+     "summary": "Initialises the lock, file list and wait queue, and provides start/stop/wait for the window in which family code may create events.",
+     "details": "`start` sets `events_live`, `stop` clears it so no new event context is admitted, and `wait` sleeps until `active_event_contexts` drops to zero. Teardown uses stop, wait, then `ctlv_event_device_dead()`."
+    },
+    {
+     "title": "Event record allocation and building",
+     "kind": "function",
+     "start": 195,
+     "end": 244,
+     "anchor": "@room bounds storage",
+     "summary": "Allocate a record sized for header plus root, point an op context's output builder at it, finalise length and padding, and reserve per-file marker records.",
+     "details": "`ctlv_event_record_build()` uses the root `ctlv_family` and the op's reply schema, since core events outlive the device's family. `record_done()` zero-fills padding so the whole record can be copied to userspace."
+    },
+    {
+     "title": "ctlv_event_file_init() and ctlv_event_file_exit()",
+     "kind": "function",
+     "start": 246,
+     "end": 289,
+     "anchor": "int ctlv_event_file_init(",
+     "summary": "Sets up a file's queue state, subscription bitmap and the two reserved marker records, then links it on the device; exit unlinks and frees.",
+     "details": "The device-removed record is pre-built at open time. Queue usage starts at `queue_reserved`, so reserved storage is never charged to events. Exit frees queued records but frees the reserved ones by identity (`overflow`, `removed`)."
+    },
+    {
+     "title": "Queue insertion and drop accounting",
+     "kind": "function",
+     "start": 291,
+     "end": 335,
+     "anchor": "static void ctlv_event_queue_add(",
+     "summary": "Adds records to a file's queue, aggregates drops into one overflow marker per epoch, and decides per file whether an event is queued or dropped.",
+     "details": "- Every subscribed event consumes a sequence number, whether delivered or dropped, so readers can see the gap.\n- A drop happens when already overflowing, no record is available, or the byte budget would be exceeded.\n- Must be called with `events_lock` held."
+    },
+    {
+     "title": "ctlv_event_create() - admission and ctx setup",
+     "kind": "function",
+     "start": 337,
+     "end": 372,
+     "anchor": "static void ctlv_event_free(struct ctlv_op_ctx *ctx);",
+     "summary": "Allocates an op context and, under the lock, admits it only if events are live and the family is bound, taking a device reference and counting it active.",
+     "details": "Admission pins the device and family until `ctlv_event_emit()` or `ctlv_event_abort()`. Failure paths before admission free only the context."
+    },
+    {
+     "title": "ctlv_event_create() - output builder",
+     "kind": "function",
+     "start": 374,
+     "end": 401,
+     "anchor": "op = ctlv_op_find(ctlvdev, op_id);",
+     "summary": "Looks up the event op, allocates the root buffer, initialises the output message and returns the reply cursor for the caller to fill.",
+     "details": "Reached through the generated `CTLV_EVENT_CREATE()` wrappers. Errors after admission go through `ctlv_event_free()` to undo the count and reference. Exported to the CTLV namespace."
+    },
+    {
+     "title": "ctlv_event_free()",
+     "kind": "function",
+     "start": 403,
+     "end": 420,
+     "anchor": "static void ctlv_event_free(struct ctlv_op_ctx *ctx)",
+     "summary": "Releases an event context, drops the active count, wakes `ctlv_event_contexts_wait()` waiters at zero and puts the device."
+    },
+    {
+     "title": "Finish validation and subscriber copies",
+     "kind": "function",
+     "start": 422,
+     "end": 458,
+     "anchor": "Reject an incomplete or schema-invalid",
+     "summary": "`ctlv_event_finish()` rejects poisoned, unbalanced or schema-invalid events; `ctlv_event_copies()` builds one padded record per subscribed file before any queue lock is taken.",
+     "details": "Allocation uses the context's `gfp`. If an allocation fails, fewer copies exist than files, and the missing ones are treated as drops at delivery time."
+    },
+    {
+     "title": "ctlv_event_deliver(), ctlv_event_emit(), ctlv_event_abort()",
+     "kind": "function",
+     "start": 460,
+     "end": 518,
+     "anchor": "static void ctlv_event_deliver(",
+     "summary": "Publish a finished event: count subscribers, build spare copies outside the lock, hand each file one (or a drop) under the lock, free leftovers, and consume the context.",
+     "details": "- `emit` and `abort` both consume `ctx` and are rejected for contexts bound to a file.\n- Nothing is delivered once `dead_announced` is set.\n- Exported to the CTLV namespace for families."
+    },
+    {
+     "title": "ctlv_event_lost() and ctlv_event_op_changed()",
+     "kind": "function",
+     "start": 520,
+     "end": 552,
+     "anchor": "void ctlv_event_lost(",
+     "summary": "`lost` records a drop of an event that could not be created for every subscriber; `op_changed` builds and emits the root OP_CHANGED event, falling back to `lost`.",
+     "details": "`lost` does not allocate or sleep. `op_changed` uses `GFP_NOWAIT` and is called from dispatch when an op's availability changes (patch 12)."
+    },
+    {
+     "title": "ctlv_event_device_dead()",
+     "kind": "function",
+     "start": 554,
+     "end": 568,
+     "anchor": "void ctlv_event_device_dead(",
+     "summary": "Queues each file's pre-built device-removed record, then publishes `dead_announced` and wakes readers.",
+     "details": "Ordering matters: the flag is published only after terminal records are queued, so a reader that sees it has them. Called once from device teardown."
+    },
+    {
+     "title": "ctlv_event_overflow_fill()",
+     "kind": "function",
+     "start": 570,
+     "end": 593,
+     "anchor": "Materialize the final loss count",
+     "summary": "Builds the overflow marker's payload (first and last dropped sequence, count) when the reader takes it, and moves the epoch into the reported fields.",
+     "details": "Fills into reserved storage sized for the largest overflow event. The reported fields allow `untake` to merge the epoch back if the read fails."
+    },
+    {
+     "title": "Take, untake, consume",
+     "kind": "function",
+     "start": 595,
+     "end": 643,
+     "anchor": "static struct ctlv_event_record *ctlv_event_queue_take(",
+     "summary": "The reader-side queue protocol: take the head record, restore it if copying to userspace fails, and release it (or requeue the marker) after success.",
+     "details": "Non-reserved records give back their bytes on take and re-charge them on untake. For the overflow marker, untake merges the reported epoch with any new one; consume requeues it if a new loss epoch opened meanwhile."
+    },
+    {
+     "title": "ctlv_event_file_read()",
+     "kind": "function",
+     "start": 645,
+     "end": 697,
+     "anchor": "static bool ctlv_event_waiting(",
+     "summary": "read() implementation: serialise readers, wait for a record (or -EAGAIN / -ENODEV), and copy exactly one whole record to the user buffer.",
+     "details": "- `reading` mutex serialises dup()'d descriptors sharing one queue.\n- A buffer smaller than the record yields -EMSGSIZE without consuming it; a copy fault yields -EFAULT and untakes.\n- -ENODEV is returned only after the queue is drained and the device is dead.\n- Called from the file_operations read in patch 12."
+    },
+    {
+     "title": "ctlv_event_file_poll()",
+     "kind": "function",
+     "start": 699,
+     "end": 715,
+     "anchor": "__poll_t ctlv_event_file_poll(",
+     "summary": "poll(): EPOLLIN while records are queued, plus EPOLLHUP once the device is dead."
+    },
+    {
+     "title": "Subscription helpers",
+     "kind": "function",
+     "start": 717,
+     "end": 753,
+     "anchor": "Validate every ID before changing",
+     "summary": "Two-pass set/clear of the file's subscription bits: first validate every requested op ID is an event this device emits, then apply under the lock.",
+     "details": "Unknown or non-event IDs produce -EOPNOTSUPP with a formatted message before any bit is changed, so the request is all-or-nothing."
+    },
+    {
+     "title": "Subscription actions",
+     "kind": "function",
+     "start": 755,
+     "end": 767,
+     "anchor": "int ctlv_subscriptions_add_action(",
+     "summary": "Root-family actions `ctlv_subscriptions_add` and `ctlv_subscriptions_remove`, thin wrappers over the helper with the right generated attribute ref.",
+     "details": "Declared by the generated root bindings (patch 3) and wired into the root op table."
+    },
+    {
+     "title": "Event queue query and action",
+     "kind": "function",
+     "start": 769,
+     "end": 801,
+     "anchor": "int ctlv_event_queue_get_query(",
+     "summary": "Root-family ops to report the file's queue length and use, and to resize the queue within bounds.",
+     "details": "- `get` reports under the lock and finishes the query in one fragment.\n- `set` accepts lengths between `queue_min` and `CTLV_MAX_EVENT_QUEUE_LEN` and refuses (-EBUSY) a limit below the current usage, so nothing queued is discarded."
+    }
+   ]
+  },
+  {
+   "path": "drivers/ctlv/event.h",
+   "purpose": "Core-internal interface of event.c: the event record and per-open file structs and the hooks called by dispatch.",
+   "units": [
+    {
+     "title": "Header and forward declarations",
+     "kind": "section",
+     "start": 808,
+     "end": 824,
+     "anchor": "SPDX-License-Identifier",
+     "summary": "Include guard, includes and opaque types."
+    },
+    {
+     "title": "struct ctlv_event_record",
+     "kind": "struct",
+     "start": 826,
+     "end": 833,
+     "anchor": "struct ctlv_event_record {",
+     "summary": "One queued event: list node, used length, allocated room, a `reserved` flag, the wire header and the flexible root payload.",
+     "details": "Header plus root are contiguous so one `copy_to_user()` of `len` bytes delivers a record. `reserved` marks the per-file overflow and removed records, which are never freed by queue consumption."
+    },
+    {
+     "title": "struct ctlv_file",
+     "kind": "struct",
+     "start": 835,
+     "end": 858,
+     "anchor": "struct ctlv_file {",
+     "summary": "State of one open file: its place on the device list, the record queue and byte accounting, subscription bitmap, overflow/removed markers with loss-epoch counters, and reader synchronisation.",
+     "details": "Everything except `reading` and the wait queue is protected by the device's `events_lock`. `sequence` numbers every subscribed event."
+    },
+    {
+     "title": "Event hooks",
+     "kind": "function",
+     "start": 860,
+     "end": 875,
+     "anchor": "int ctlv_event_sizes(",
+     "summary": "Prototypes for the device-lifecycle, file lifecycle, read/poll and op-changed hooks that dispatch calls."
+    }
+   ]
+  },
+  {
+   "path": "drivers/ctlv/internal.h",
+   "purpose": "Private core definitions shared by the ctlv .c files, notably `struct ctlv_op_entry` and `struct ctlv_op_ctx`.",
+   "units": [
+    {
+     "title": "Forward declaration of ctlv_file",
+     "kind": "text",
+     "start": 885,
+     "end": 885,
+     "anchor": "struct ctlv_file;",
+     "summary": "Opaque type used by the new op ctx member."
+    },
+    {
+     "title": "op_entry: event_index",
+     "kind": "struct",
+     "start": 893,
+     "end": 893,
+     "anchor": "u32 event_index;",
+     "summary": "Index of an event op in the per-file subscription bitmap (`bitmap_zalloc(events_count)`)."
+    },
+    {
+     "title": "op_ctx: device, file, gfp",
+     "kind": "struct",
+     "start": 901,
+     "end": 906,
+     "anchor": "struct ctlv_device *ctlvdev;",
+     "summary": "Adds the owning device, the open file (NULL for events), and the allocation flags used while building events.",
+     "details": "Event contexts have `file == NULL`; `ctlv_event_emit()` and `abort` warn if it is set."
+    },
+    {
+     "title": "ctlv_op_find() declaration",
+     "kind": "function",
+     "start": 914,
+     "end": 915,
+     "anchor": "struct ctlv_op_entry *ctlv_op_find(",
+     "summary": "Declares the op lookup by ID that event.c uses; it is defined in the dispatch code (patch 12)."
+    }
+   ]
+  },
+  {
+   "path": "include/linux/ctlv.h",
+   "purpose": "Public API header for CTLV families; this patch adds the event emission entry points.",
+   "units": [
+    {
+     "title": "ctlv_event_lost()",
+     "kind": "function",
+     "start": 925,
+     "end": 932,
+     "anchor": "/**",
+     "summary": "Reports an event that could not be created; does not allocate or sleep and is not for interrupt context."
+    },
+    {
+     "title": "ctlv_event_emit() and ctlv_event_abort()",
+     "kind": "function",
+     "start": 934,
+     "end": 950,
+     "anchor": "/**",
+     "summary": "Publish a completed event or discard one under construction; both consume the context."
+    }
+   ]
+  },
+  {
+   "path": "include/linux/ctlv_family.h",
+   "purpose": "Header for family implementers; this patch adds event creation.",
+   "units": [
+    {
+     "title": "ctlv_event_create() and CTLV_EVENT_CREATE()",
+     "kind": "macro",
+     "start": 961,
+     "end": 970,
+     "anchor": "struct ctlv_op_ctx *ctlv_event_create(",
+     "summary": "Declares the core event creator and the macro that generates a typed `<name>_create(ctlvdev, &reply, gfp)` wrapper for one event op ID.",
+     "details": "Instantiated by generated headers, e.g. `CTLV_EVENT_CREATE(ctlv_op_changed, CTLV_OP_OP_CHANGED)` in the root family and the attestation log-entry event."
+    }
+   ]
+  }
+ ]
+}

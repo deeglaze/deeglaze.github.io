@@ -1,0 +1,293 @@
+{
+ "patch": 15,
+ "title": "attestation: Prepare provider and instance core",
+ "overview": "Introduces the attestation core module: the public provider descriptor (include/linux/attestation.h), the private instance object (core/internal.h) and the registry, validation and lifecycle code (core/core.c) that implement the generated base-family callbacks. Provider drivers depend on the header; core.c depends on the generated CTLV header from patch 14. Journal storage follows in patch 16 and CTLV operation handlers in patch 17, so CONFIG_ATTESTATION is not yet wired into a parent Kconfig.",
+ "files": [
+  {
+   "path": "Documentation/driver-api/attestation.rst",
+   "purpose": "Driver-API document describing how a provider registers with the attestation family and how teardown is ordered. Linked from the driver-api index.",
+   "units": [
+    {
+     "title": "Overview of the subsystem",
+     "kind": "doc",
+     "start": 39,
+     "end": 49,
+     "anchor": ".. SPDX-License-Identifier",
+     "summary": "States that providers appear as descendants of the ctlv-attestation family and split ownership between core and provider.",
+     "details": "The core owns evidence retrieval, MR topology and the append-only journal; providers own native hardware access and immutable capability descriptions."
+    },
+    {
+     "title": "Registering a provider",
+     "kind": "doc",
+     "start": 51,
+     "end": 66,
+     "anchor": "Registering a provider",
+     "summary": "Explains the descriptor, the pre_init hand-off and the per-instance mutex that serializes operations.",
+     "details": "- The provider passes `struct attestation_provider` to the base family via the generated `pre_init`.\n- Family-wide op hooks delegate to `ctlv_attestation_op_pre()`/`ctlv_attestation_op_post()`, which take and drop `att->lock`.\n- Descriptor and MR storage must stay valid until `ctlv_destroy()` or failed-creation unwind."
+    },
+    {
+     "title": "Teardown",
+     "kind": "doc",
+     "start": 68,
+     "end": 74,
+     "anchor": "Teardown",
+     "summary": "Documents the teardown order: drain operations, withdraw from the registry in pre_fini, stop events, then fini.",
+     "details": "This matches `ctlv_attestation_pre_fini()` and `ctlv_attestation_fini()` in core.c."
+    }
+   ]
+  },
+  {
+   "path": "Documentation/driver-api/index.rst",
+   "purpose": "Driver-API table of contents.",
+   "units": [
+    {
+     "title": "Add attestation to the toctree",
+     "kind": "doc",
+     "start": 83,
+     "end": 83,
+     "anchor": "attestation",
+     "summary": "Links the new attestation.rst right after the ctlv document."
+    }
+   ]
+  },
+  {
+   "path": "MAINTAINERS",
+   "purpose": "Maintainer entry for the attestation subsystem.",
+   "units": [
+    {
+     "title": "Add document and header paths",
+     "kind": "text",
+     "start": 95,
+     "end": 97,
+     "anchor": "F:\tDocumentation/driver-api/attestation.rst",
+     "summary": "Extends the existing entry to cover the driver-api document and include/linux/attestation*."
+    }
+   ]
+  },
+  {
+   "path": "drivers/attestation/Kconfig",
+   "purpose": "Kconfig menu for the attestation core.",
+   "units": [
+    {
+     "title": "ATTESTATION menuconfig",
+     "kind": "config",
+     "start": 107,
+     "end": 118,
+     "anchor": "SPDX",
+     "summary": "Tristate option depending on CTLV that builds the attestation core.",
+     "details": "The directory is not yet sourced from a parent Kconfig; later patches wire it up once CTLV handlers exist."
+    }
+   ]
+  },
+  {
+   "path": "drivers/attestation/Makefile",
+   "purpose": "Build rules for the attestation module.",
+   "units": [
+    {
+     "title": "attestation.o from core/core.o",
+     "kind": "build",
+     "start": 125,
+     "end": 128,
+     "anchor": "SPDX",
+     "summary": "Builds a single attestation module whose only object so far is core/core.o.",
+     "details": "Later patches append the journal and operation-handler objects to attestation-y."
+    }
+   ]
+  },
+  {
+   "path": "drivers/attestation/core/core.c",
+   "purpose": "Core of the attestation module: validates provider descriptors, keeps a global registry of instances, and implements the generated base-family lifecycle and operation-hook callbacks. It is called by CTLV (init, post_init, pre_fini, fini, op_pre/op_post) and by provider drivers through the base family, and calls the generated provide/enable helpers.",
+   "units": [
+    {
+     "title": "Header, includes and registry state",
+     "kind": "section",
+     "start": 135,
+     "end": 152,
+     "anchor": "// SPDX-License-Identifier",
+     "summary": "Includes plus the global xarray of instances, the registry mutex and the next-index counter.",
+     "details": "`attestation_instances` maps a monotonically increasing index to each `struct attestation`; `attestation_registry_lock` serializes index allocation and insertion."
+    },
+    {
+     "title": "attestation_algorithm_valid()",
+     "kind": "function",
+     "start": 154,
+     "end": 158,
+     "anchor": "static bool attestation_algorithm_valid",
+     "summary": "Accepts only known hash algorithms with a nonzero digest size that fits HASH_MAX_DIGESTSIZE.",
+     "details": "Used by MR property validation."
+    },
+    {
+     "title": "attestation_mr_props_validate()",
+     "kind": "function",
+     "start": 160,
+     "end": 180,
+     "anchor": "static int attestation_mr_props_validate",
+     "summary": "Checks one fixed MR descriptor: name, strictly ascending valid algorithm list, and that readable/extendable flags have matching provider callbacks.",
+     "details": "Strictly ascending order makes the algorithm list unique and gives digest sets a canonical order. Limits (name length 128, up to 21 algorithms) mirror the schema."
+    },
+    {
+     "title": "attestation_evidence_caps_validate()",
+     "kind": "function",
+     "start": 182,
+     "end": 211,
+     "anchor": "static int attestation_evidence_caps_validate",
+     "summary": "Validates evidence capabilities and their consistency with the evidence_get callback.",
+     "details": "- No caps requires no `evidence_get`; caps require it.\n- Bounds on object count, challenge lengths and total output are checked.\n- Each object needs a bounded, non-empty, unique format name and a length within the total."
+    },
+    {
+     "title": "attestation_provider_validate()",
+     "kind": "function",
+     "start": 213,
+     "end": 233,
+     "anchor": "int attestation_provider_validate",
+     "summary": "Top-level check of a provider descriptor, run once at core init.",
+     "details": "Calls the evidence caps and per-MR validators, and requires mrs/mrs_count to agree and MR callbacks to be accompanied by MRs. Declared in internal.h."
+    },
+    {
+     "title": "attestation_parent_exists()",
+     "kind": "function",
+     "start": 235,
+     "end": 244,
+     "anchor": "static bool attestation_parent_exists",
+     "summary": "Scans the registry for an instance already attached to the same parent device.",
+     "details": "Enforces one attestation instance per parent device. Called with the xarray lock held from `attestation_registry_insert()`."
+    },
+    {
+     "title": "attestation_registry_insert() and remove()",
+     "kind": "function",
+     "start": 246,
+     "end": 281,
+     "anchor": "static int attestation_registry_insert",
+     "summary": "Allocates the next index, reserves a slot, then atomically checks for a duplicate parent and stores the instance.",
+     "details": "- Under the registry mutex the slot is reserved with GFP_KERNEL so the later store under the xa lock can use GFP_NOWAIT without failing.\n- A duplicate parent erases the reservation and returns -EEXIST.\n- On success `att->index` is set and the counter advances.\n- The entry is stored without ATTESTATION_REGISTERED; `attestation_registry_remove()` erases it."
+    },
+    {
+     "title": "Registered mark helpers",
+     "kind": "function",
+     "start": 283,
+     "end": 300,
+     "anchor": "bool attestation_registered",
+     "summary": "Query and clear the ATTESTATION_REGISTERED xarray mark that says an instance accepts operations.",
+     "details": "Both require `att->lock` held. The mark is set in `ctlv_attestation_post_init()` and cleared by `attestation_stop()` or `ctlv_attestation_pre_fini()`."
+    },
+    {
+     "title": "attestation_provide_ops()",
+     "kind": "function",
+     "start": 302,
+     "end": 311,
+     "anchor": "void attestation_provide_ops",
+     "summary": "Marks the evidence-get operation as provided and enabled when the provider has evidence capabilities.",
+     "details": "Uses the generated `ctlv_attestation_evidence_get_provide/enable` helpers so CTLV advertises only operations the provider supports."
+    },
+    {
+     "title": "attestation_core_init() and fini()",
+     "kind": "function",
+     "start": 313,
+     "end": 344,
+     "anchor": "int attestation_core_init",
+     "summary": "Initializes an instance: validate provider, init lock, register in the xarray, enable ops; fini undoes it.",
+     "details": "- `att->initialized` records successful registration so `attestation_core_fini()` only removes registered entries.\n- Fini is idempotent via the `ctlvdev` NULL check, so the error path in init can reuse it.\n- Registered mark is not set yet; that waits for post_init."
+    },
+    {
+     "title": "Generated base-family callbacks",
+     "kind": "function",
+     "start": 346,
+     "end": 378,
+     "anchor": "size_t ctlv_attestation_priv_size",
+     "summary": "Implements the lifecycle callbacks the generated family calls: priv_size, init, post_init, pre_fini, fini.",
+     "details": "- `init_info` is the provider descriptor passed through pre_init.\n- post_init sets ATTESTATION_REGISTERED, making the instance visible to operations.\n- pre_fini clears it while CTLV events still work; fini releases the core state."
+    },
+    {
+     "title": "Operation hooks",
+     "kind": "function",
+     "start": 380,
+     "end": 397,
+     "anchor": "int ctlv_attestation_op_pre",
+     "summary": "op_pre takes the instance mutex and rejects operations on unregistered instances; op_post releases it.",
+     "details": "Providers' family-wide hooks delegate here, so the mutex covers the native callback, journal commit and event emission. op_pre returns -ENODEV with the lock dropped; on success the lock is held until op_post."
+    },
+    {
+     "title": "Module init/exit and metadata",
+     "kind": "function",
+     "start": 399,
+     "end": 414,
+     "anchor": "static int __init attestation_module_init",
+     "summary": "Trivial module init; exit asserts the registry is empty and destroys the xarray.",
+     "details": "MODULE_IMPORT_NS(\"CTLV\") gives access to the CTLV exported symbols."
+    }
+   ]
+  },
+  {
+   "path": "drivers/attestation/core/internal.h",
+   "purpose": "Private header shared by core files: the instance structure and internal function prototypes. Included by core.c and later by journal and op-handler files.",
+   "units": [
+    {
+     "title": "Includes and ATTESTATION_REGISTERED",
+     "kind": "section",
+     "start": 421,
+     "end": 432,
+     "anchor": "/* SPDX-License-Identifier",
+     "summary": "Include guard, dependencies including the generated CTLV header, and the xarray mark used for registration."
+    },
+    {
+     "title": "struct attestation",
+     "kind": "struct",
+     "start": 434,
+     "end": 443,
+     "anchor": "struct attestation {",
+     "summary": "The per-instance private object stored in CTLV priv: device, provider descriptor, registry index, lock and init flag.",
+     "details": "`lock` guards mutable instance state and serializes operations; `provider` is immutable and owned by the provider driver."
+    },
+    {
+     "title": "Internal prototypes",
+     "kind": "function",
+     "start": 445,
+     "end": 455,
+     "anchor": "int attestation_core_init(",
+     "summary": "Declarations for core init/fini, registered-state helpers, provider validation and op enabling."
+    }
+   ]
+  },
+  {
+   "path": "include/linux/attestation.h",
+   "purpose": "Public API for provider drivers: the immutable descriptors and callbacks a provider supplies. The generated base family and core.c consume them; later patches (TDX provider) implement them.",
+   "units": [
+    {
+     "title": "Header and digest types",
+     "kind": "struct",
+     "start": 462,
+     "end": 493,
+     "anchor": "/* SPDX-License-Identifier",
+     "summary": "Includes, forward declarations, and the digest and digest-set types used by MR callbacks.",
+     "details": "A digest set is ordered the same way as the MR's algorithm list."
+    },
+    {
+     "title": "struct attestation_mr_props",
+     "kind": "struct",
+     "start": 495,
+     "end": 515,
+     "anchor": "/**",
+     "summary": "Immutable description of one measurement register: id, name, ordered algorithms, optional native index, and readable/extendable flags."
+    },
+    {
+     "title": "Evidence capability and request types",
+     "kind": "struct",
+     "start": 517,
+     "end": 575,
+     "anchor": "/**",
+     "summary": "Types describing what evidence a provider can produce and the validated request and result passed to its callback.",
+     "details": "Caps list supported formats and bounds; a request carries the challenge and resolved output blobs, and the result reports the length produced per object."
+    },
+    {
+     "title": "struct attestation_provider",
+     "kind": "struct",
+     "start": 577,
+     "end": 599,
+     "anchor": "/**",
+     "summary": "The provider descriptor: native callbacks (evidence_get, mr_read, mr_extend) plus immutable evidence caps and fixed MR array.",
+     "details": "Validated by `attestation_provider_validate()`; callbacks receive the `struct attestation` and run under its lock."
+    }
+   ]
+  }
+ ]
+}

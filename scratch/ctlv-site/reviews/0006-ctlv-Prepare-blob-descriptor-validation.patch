@@ -1,0 +1,226 @@
+Hi Jiri,
+
+A few comments on this patch inline.
+
+> From 7966dfb03cf6faa2cb02fbf7b1c270e3f11b230b Mon Sep 17 00:00:00 2001
+> From: Jiri Pirko <jiri@nvidia.com>
+> Date: Thu, 15 Oct 2026 16:50:39 +0200
+> Subject: [PATCH 06/20] ctlv: Prepare blob descriptor validation
+>
+> Add parsing and VA checks for blob descriptors shared by schema
+> validation and runtime acquisition.
+>
+> Keep CONFIG_CTLV unwired until dispatch completes the module.
+
+The "unwired" approach means nothing in `drivers/ctlv` is compiled until a later patch adds the hook-up, so this patch (and the Makefile hunk) gets zero build coverage, and any compile error here would only show up many patches later and be blamed on the wrong commit. Please either wire `CONFIG_CTLV` (even with a stub) early, or at least state in the commit message that this was build-tested out of tree.
+
+Also the commit message is thin: "VA checks" is misleading. The only checks are non-zero length, `max_len`, alignment and start+length overflow. Nothing verifies the address is a user address (no `access_ok()`/`TASK_SIZE` style bound), which a reader would expect from "VA checks"; please say where that happens.
+
+>
+> Assisted-by: Cursor: GPT-5.6 Sol
+> Assisted-by: Cursor: Claude Opus 5.5
+> Signed-off-by: Jiri Pirko <jiri@nvidia.com>
+> ---
+>  drivers/ctlv/Makefile    |   2 +-
+>  drivers/ctlv/blob_desc.c | 102 +++++++++++++++++++++++++++++++++++++++
+>  drivers/ctlv/blob_desc.h |  29 +++++++++++
+>  3 files changed, 132 insertions(+), 1 deletion(-)
+>  create mode 100644 drivers/ctlv/blob_desc.c
+>  create mode 100644 drivers/ctlv/blob_desc.h
+>
+> diff --git a/drivers/ctlv/Makefile b/drivers/ctlv/Makefile
+> index 4f0fe41bc9e1..5edc0b4b973f 100644
+> --- a/drivers/ctlv/Makefile
+> +++ b/drivers/ctlv/Makefile
+> @@ -1,4 +1,4 @@
+>  # SPDX-License-Identifier: GPL-2.0
+>  obj-$(CONFIG_CTLV) += ctlv.o
+>  
+> -ctlv-y += message.o
+> +ctlv-y += blob_desc.o message.o
+
+Nit: the whole-module Makefile gains an object that nothing references yet; same unwired comment as above.
+
+> diff --git a/drivers/ctlv/blob_desc.c b/drivers/ctlv/blob_desc.c
+> new file mode 100644
+> index 000000000000..b84be3d723ab
+> --- /dev/null
+> +++ b/drivers/ctlv/blob_desc.c
+> @@ -0,0 +1,102 @@
+> +// SPDX-License-Identifier: GPL-2.0-only
+> +/*
+> + * Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES
+> + *
+> + * Blob descriptor parsing and validation.
+> + */
+> +#include <linux/align.h>
+> +#include <linux/bits.h>
+> +#include <linux/overflow.h>
+> +#include <linux/types.h>
+> +
+> +#include <uapi/linux/ctlv.h>
+> +#include <uapi/linux/ctlv_gen.h>
+> +
+> +#include "blob_desc.h"
+> +#include "message.h"
+> +
+> +static int ctlv_blob_member(u64 attr_id)
+> +{
+
+`ctlv_blob_member()` maps attr IDs to an enum whose numeric order is documented as "the order the root family declares them". That is a coupling to the generated `enum _ctlv_attr_blob` (TYPE=1..LENGTH=5), not enforced by anything. A `BUILD_BUG_ON` or building the table from the generated IDs would be more robust. Returning int with -1 for "none" is also awkward next to the `u32` `BIT()` uses; a bool plus out param or a table lookup would be simpler.
+
+> +	switch (attr_id) {
+> +	case CTLV_ATTR_BLOB_TYPE:
+> +		return CTLV_BLOB_MEMBER_TYPE;
+> +	case CTLV_ATTR_BLOB_ADDRESS:
+> +		return CTLV_BLOB_MEMBER_ADDRESS;
+> +	case CTLV_ATTR_BLOB_FD:
+> +		return CTLV_BLOB_MEMBER_FD;
+> +	case CTLV_ATTR_BLOB_OFFSET:
+> +		return CTLV_BLOB_MEMBER_OFFSET;
+> +	case CTLV_ATTR_BLOB_LENGTH:
+> +		return CTLV_BLOB_MEMBER_LENGTH;
+> +	default:
+> +		return -1;
+> +	}
+> +}
+> +
+> +u32 ctlv_blob_desc_read(const struct ctlv_attr *blob, struct ctlv_blob_desc *desc,
+> +			const struct ctlv_attr **bad)
+> +{
+> +	const struct ctlv_attr *child = NULL;
+> +	enum ctlv_message_step step;
+> +
+> +	*desc = (struct ctlv_blob_desc){};
+> +	while ((step = ctlv_message_next(blob, &child)) == CTLV_MESSAGE_STEP_ATTR) {
+> +		int member = ctlv_blob_member(child->attr_id);
+> +
+> +		*bad = child;
+> +		if (child->flags & ~CTLV_ATTR_F_NESTED)
+
+Flag handling is inconsistent with `schema.c`: for ordinary attrs the request path accepts `CTLV_ATTR_F_IGNORE_IF_UNKNOWN` on a known attr (`CTLV_SCHEMA_ATTR_F_REQUEST`), whereas here any flag other than NESTED, including `IGNORE_IF_UNKNOWN`, is rejected as `UNKNOWN_FLAG`. Also, a child with an unknown flag and an unknown ID reports `UNKNOWN_FLAG` before `UNKNOWN_ATTR`; fine, but pick one documented order.
+
+> +			return CTLV_VALIDATION_REASON_UNKNOWN_FLAG;
+> +		if (child->flags & CTLV_ATTR_F_NESTED)
+> +			return CTLV_VALIDATION_REASON_MALFORMED_MESSAGE;
+> +		if (member < 0)
+> +			return CTLV_VALIDATION_REASON_UNKNOWN_ATTR;
+> +		if (ctlv_message_attr_payload_len(child) != sizeof(u64))
+> +			return CTLV_VALIDATION_REASON_BAD_LENGTH;
+> +		if (desc->present & BIT(member))
+
+`CTLV_VALIDATION_REASON_BAD_BLOB_DESCRIPTOR` is returned for a duplicate member, but *bad points at the duplicate, while a missing member (see `ctlv_blob_variant`) leaves bad `NULL` so the offset lands on the blob nest. Reasonable, but nothing documents it; there is no kernel-doc at all on the two exported functions (return value is a `CTLV_VALIDATION_REASON_*` `u32` rather than an errno, which is unusual and easy to misuse, e.g. `if (ret < 0)`).
+
+> +			return CTLV_VALIDATION_REASON_BAD_BLOB_DESCRIPTOR;
+> +		desc->present |= BIT(member);
+> +		desc->member[member] = *(const u64 *)ctlv_message_attr_payload(child);
+
+The payload is read as `*(const u64 *)`. It is naturally 8-byte aligned only because the attr header is 16 bytes and the message base is aligned; a comment (as `schema.c` has in `ctlv_schema_scalar_value()`) or `get_unaligned()`/memcpy would document that. Also a third copy of the same read idiom (`schema.c` has `ctlv_schema_scalar_value()`); please share one helper in `message.h`.
+
+> +	}
+> +	*bad = NULL;
+
+On `STEP_BAD` the loop leaves *bad as set for the previous attr and then it is reset to `NULL` below, so a caller can never learn which attr was truncated. That is OK for `schema.c` (it reports the nest), but then the 'bad' contract is just "the attr that failed a member check". Document it.
+
+> +	if (step == CTLV_MESSAGE_STEP_BAD)
+> +		return CTLV_VALIDATION_REASON_MALFORMED_MESSAGE;
+> +	return 0;
+> +}
+> +
+> +static u32 ctlv_blob_variant(const struct ctlv_blob_desc *desc)
+
+`ctlv_blob_variant()` is a one-case switch with a default that rejects: speculative generality for backings (FD, OFFSET) that do not exist yet. `CTLV_BLOB_MEMBER_FD` and `CTLV_BLOB_MEMBER_OFFSET`, the fd/offset arm in `ctlv_blob_desc_check()` below, and the "4 members" case in `schema.c`'s max-length computation are all unreachable today (`CTLV_BLOB_TYPE_VA` is the only enum value in `ctlv_gen.h`). Either drop them until FD blobs land, or add the FD type in this series. Also, the helper does two things (type-specific shape check and returns a reason) and the name 'variant' does not tell that.
+
+> +{
+> +	u32 required = BIT(CTLV_BLOB_MEMBER_TYPE) | BIT(CTLV_BLOB_MEMBER_LENGTH);
+> +
+> +	switch (desc->member[CTLV_BLOB_MEMBER_TYPE]) {
+> +	case CTLV_BLOB_TYPE_VA:
+> +		required |= BIT(CTLV_BLOB_MEMBER_ADDRESS);
+> +		break;
+> +	default:
+> +		return CTLV_VALIDATION_REASON_BAD_BLOB_DESCRIPTOR;
+> +	}
+> +	if (desc->present != required)
+> +		return CTLV_VALIDATION_REASON_BAD_BLOB_DESCRIPTOR;
+> +	return 0;
+> +}
+> +
+> +u32 ctlv_blob_desc_check(const struct ctlv_blob_desc *desc, const struct ctlv_node_schema *node)
+> +{
+> +	u64 start, length, end;
+> +	u32 reason;
+> +
+> +	reason = ctlv_blob_variant(desc);
+> +	if (reason)
+> +		return reason;
+> +	if (!(node->blob.backings & BIT(desc->member[CTLV_BLOB_MEMBER_TYPE])))
+
+Because `ctlv_blob_variant()` already restricted the type to VA, BIT(type) is safe here; but once more types are added, type is an arbitrary `u64` from userspace and BIT(type) with type >= 64 is UB/shift out of range. The ordering dependency (variant must reject unknown types first) is subtle; add a comment or guard `type < BITS_PER_TYPE(node->blob.backings)`.
+
+> +		return CTLV_VALIDATION_REASON_BAD_BLOB_DESCRIPTOR;
+> +
+> +	length = desc->member[CTLV_BLOB_MEMBER_LENGTH];
+> +	if (!length || length > node->blob.max_len)
+> +		return CTLV_VALIDATION_REASON_BAD_BLOB_DESCRIPTOR;
+> +	start = desc->member[desc->present & BIT(CTLV_BLOB_MEMBER_ADDRESS) ?
+
+This ternary selects OFFSET when ADDRESS is absent, but `ctlv_blob_variant()` guarantees ADDRESS is present for the only accepted type, so the OFFSET branch is dead code today. Likewise `end` is computed but never used: `check_add_overflow()` is being used only for its flag, so `end` is a write-only local (consider `check_add_overflow()` into a dummy, or `if (length > U64_MAX - start)`).
+
+> +				     CTLV_BLOB_MEMBER_ADDRESS :
+> +				     CTLV_BLOB_MEMBER_OFFSET];
+> +	if (!IS_ALIGNED(start, node->blob.alignment) || check_add_overflow(start, length, &end))
+
+`IS_ALIGNED()` with alignment == 0 evaluates `(start & (0 - 1)) == 0`, i.e. requires start == 0; and with a non-power-of-two alignment it is meaningless. Nothing in this patch states the schema guarantees alignment is a non-zero power of two. For VA blobs a generator-emitted alignment of 0 (unspecified) would make every non-`NULL` address fail with `BAD_BLOB_DESCRIPTOR`. Please confirm the generator always emits >= 1, or treat 0 as 1. Also, only start+length overflow of `u64` is checked: there is no upper bound on a user VA (`TASK_SIZE` / `access_ok`), so the 'VA checks' promised in the commit message are only partly there.
+
+> +		return CTLV_VALIDATION_REASON_BAD_BLOB_DESCRIPTOR;
+> +	return 0;
+> +}
+> diff --git a/drivers/ctlv/blob_desc.h b/drivers/ctlv/blob_desc.h
+> new file mode 100644
+> index 000000000000..27f77af16f01
+> --- /dev/null
+> +++ b/drivers/ctlv/blob_desc.h
+> @@ -0,0 +1,29 @@
+> +/* SPDX-License-Identifier: GPL-2.0-only */
+> +#ifndef _CTLV_BLOB_DESC_H
+> +#define _CTLV_BLOB_DESC_H
+> +
+> +#include <linux/ctlv_family.h>
+> +#include <linux/types.h>
+> +
+> +#include <uapi/linux/ctlv.h>
+> +
+> +/* The members of a descriptor, in the order the root family declares them. */
+> +enum {
+> +	CTLV_BLOB_MEMBER_TYPE,
+> +	CTLV_BLOB_MEMBER_ADDRESS,
+> +	CTLV_BLOB_MEMBER_FD,
+> +	CTLV_BLOB_MEMBER_OFFSET,
+> +	CTLV_BLOB_MEMBER_LENGTH,
+> +	CTLV_BLOB_MEMBERS,
+> +};
+> +
+> +struct ctlv_blob_desc {
+> +	u64 member[CTLV_BLOB_MEMBERS];
+> +	u32 present;
+> +};
+> +
+> +u32 ctlv_blob_desc_read(const struct ctlv_attr *blob, struct ctlv_blob_desc *desc,
+> +			const struct ctlv_attr **bad);
+> +u32 ctlv_blob_desc_check(const struct ctlv_blob_desc *desc, const struct ctlv_node_schema *node);
+
+Both prototypes are exported in a private header without kernel-doc. Neither function has a user in this patch; the only in-series users are `ctlv_schema_check_blob()` in the next patch and `blob.c` later, so the acquisition user (`blob.c`) comes later, so the commit message claim "shared by schema validation and runtime acquisition" is only true at the end of the series.
+
+> +
+> +#endif /* _CTLV_BLOB_DESC_H */
+> -- 
+> 2.55.0
+>
+
+Summary of the most serious issues for patch 6:
+ - Nothing in this patch is compiled (`CONFIG_CTLV` unwired), so zero bisect/build coverage.
+ - Dead code / speculative generality: FD and OFFSET members, the OFFSET start selection, one-case switch in `ctlv_blob_variant()`.
+ - `IS_ALIGNED()` with alignment 0 or non-power-of-two; BIT(type) shift hazard once more types exist; write-only `end`.
+ - "VA checks" in the commit message overstates: no user-address bound is checked.
+ - Inconsistent flag policy versus `schema.c` (`IGNORE_IF_UNKNOWN`), unreasoned `u64` reads, no kernel-doc.

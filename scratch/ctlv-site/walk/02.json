@@ -1,0 +1,244 @@
+{
+ "patch": 2,
+ "title": "ctlv: Add the UAPI wire format and family API",
+ "overview": "Headers-only patch that fixes the contract of the series: the userspace TLV wire format, ioctl and event record (uapi/linux/ctlv.h), the cursor type shared by core and families (linux/ctlv.h), and the static schema/op/family descriptors that generated family code fills in (linux/ctlv_family.h). Later patches (core, generated *_gen.c, family implementations) all build on these three headers; the ioctl-number and MAINTAINERS edits just register them.",
+ "files": [
+  {
+   "path": "Documentation/userspace-api/ioctl/ioctl-number.rst",
+   "purpose": "Central registry of ioctl magic numbers; reserves a code for CTLV so it does not collide with other drivers.",
+   "units": [
+    {
+     "title": "Reserve ioctl magic 0xBB",
+     "kind": "doc",
+     "start": 32,
+     "end": 33,
+     "anchor": "0xBB",
+     "summary": "Adds the 0xBB, 00-0F range to uapi/linux/ctlv.h, matching CTLV_IOC_MAGIC.",
+     "details": "The row is placed between 0xBA and 0xC0 in magic order; only sequence 0x00 (CTLV_IOC_OP_EXEC) is used in this series."
+    }
+   ]
+  },
+  {
+   "path": "MAINTAINERS",
+   "purpose": "Kernel maintainer database; extends the existing CTLV entry to cover the new headers.",
+   "units": [
+    {
+     "title": "CTLV entry: add header globs",
+     "kind": "config",
+     "start": 45,
+     "end": 46,
+     "anchor": "F:\tinclude/linux/ctlv",
+     "summary": "Adds include/linux/ctlv*.h and include/uapi/linux/ctlv*.h to the CTLV file patterns.",
+     "details": "The globs also match later generated/family headers such as ctlv_gen.h."
+    }
+   ]
+  },
+  {
+   "path": "include/linux/ctlv.h",
+   "purpose": "Small in-kernel header exposing the cursor type that family callbacks use to read requests and write replies. Includes the UAPI header; other core types stay opaque via forward declarations.",
+   "units": [
+    {
+     "title": "Header, includes and forward declarations",
+     "kind": "section",
+     "start": 56,
+     "end": 73,
+     "anchor": "SPDX-License-Identifier",
+     "summary": "Include guard, UAPI include and opaque forward declarations of core types.",
+     "details": "Families only hold pointers to ctlv_device, ctlv_family, ctlv_msg, ctlv_op_ctx and ctlv_schema_tree; their layouts are private to the core."
+    },
+    {
+     "title": "struct ctlv_cursor",
+     "kind": "struct",
+     "start": 75,
+     "end": 110,
+     "anchor": "/**",
+     "summary": "A fixed-size handle for one attribute position in one message, used for reading requests and building replies.",
+     "details": "- Reading uses @attr/@parent; writing uses @start and the @up chain, which forms the stack of open nests.\n- @tree/@node/@depth tie the position to the schema so helpers can validate types and nesting.\n- Being fixed-size, a family can place child cursors on its stack; members belong to the core and a helper of the wrong direction refuses the cursor.\n- Passed to ctlv_action_fn/ctlv_query_fn/ctlv_stub_fill_fn in ctlv_family.h."
+    }
+   ]
+  },
+  {
+   "path": "include/linux/ctlv_family.h",
+   "purpose": "Kernel-side API for family implementations and generated code: constant-initialisable schema tables (nodes, stubs, ops, family), op/lifecycle callback types and struct ctlv_family. Generated *_gen.c files build these tables with the macros here; the core consumes them to validate and dispatch.",
+   "units": [
+    {
+     "title": "Header, includes and nest-depth limit",
+     "kind": "section",
+     "start": 117,
+     "end": 134,
+     "anchor": "SPDX-License-Identifier",
+     "summary": "Guard, includes and CTLV_MAX_DECLARED_NEST_DEPTH, one level below the wire limit.",
+     "details": "The spare level is reserved so op-schema-get can wrap a described schema in one extra nest."
+    },
+    {
+     "title": "struct ctlv_node_schema",
+     "kind": "struct",
+     "start": 136,
+     "end": 165,
+     "anchor": "struct ctlv_node_schema {",
+     "summary": "One flat schema node: attr ID, kind, unit/scale, occurrence bound, child range and a kind-specific constraint union.",
+     "details": "- Trees are flat arrays; nests refer to children by @first_child/@children_count, with @required_children_count of them mandatory.\n- @reenters marks a nest that may recurse into an ancestor node.\n- The union holds range (uint/sint/enum), flags_mask, length (string/binary) or blob parameters, selected by @kind (enum ctlv_schema_kind).\n- CTLV_NODE_SCHEMA_UNLIMITED (0) means no occurrence cap."
+    },
+    {
+     "title": "Node schema initialiser macros: nest, uint, sint",
+     "kind": "macro",
+     "start": 167,
+     "end": 208,
+     "anchor": "#define __CTLV_NODE_SCHEMA(",
+     "summary": "Designated-initialiser helpers that build a ctlv_node_schema for the root, nests and integer/enum attrs.",
+     "details": "The __ forms are the common base; the public forms fix the kind and fill the union member. Used by generated tables."
+    },
+    {
+     "title": "Node schema initialiser macros: flags, bool, string, binary, blob",
+     "kind": "macro",
+     "start": 210,
+     "end": 230,
+     "anchor": "#define CTLV_NODE_SCHEMA_FLAGS(",
+     "summary": "Initialisers for the remaining leaf kinds.",
+     "details": "STRING and BINARY share the length union member; BLOB fills max_len, alignment, backings and direction."
+    },
+    {
+     "title": "Stub schema and initialisers",
+     "kind": "struct",
+     "start": 232,
+     "end": 247,
+     "anchor": "struct ctlv_stub_schema {",
+     "summary": "Describes a placeholder node in a tree whose content is supplied by another family's fill schema.",
+     "details": "Identified by (family_id, set_id) plus the node index; @optional lets the slot be left unfilled."
+    },
+    {
+     "title": "struct ctlv_schema_tree and tree macros",
+     "kind": "struct",
+     "start": 249,
+     "end": 268,
+     "anchor": "struct ctlv_schema_tree {",
+     "summary": "Bundle of a node array and optional stub array, with macros that build it from a naming convention.",
+     "details": "CTLV_SCHEMA_TREE(name) expects `name_node_schemas`; the _STUBS form also expects `name_stub_schemas`; _NONE gives an empty tree for ops without a request or reply."
+    },
+    {
+     "title": "struct ctlv_stub_fill_schema",
+     "kind": "struct",
+     "start": 270,
+     "end": 280,
+     "anchor": "struct ctlv_stub_fill_schema {",
+     "summary": "The member tree a family contributes to fill a stub identified by (family_id, set_id).",
+     "details": "CTLV_STUB_FILL_SCHEMA takes `name_fill` as the member tree. It is matched at runtime to stub_ops (ctlv_stub_ops) with the same IDs."
+    },
+    {
+     "title": "struct ctlv_op_sizes and struct ctlv_op_schema",
+     "kind": "struct",
+     "start": 282,
+     "end": 300,
+     "anchor": "struct ctlv_op_sizes {",
+     "summary": "Per-op size limits and the op descriptor: ID, type, fd access, availability, request and reply trees.",
+     "details": "- Sizes: request max, action reply max, query reply min/suggested, event record max.\n- @type is a CTLV_OP_TYPE_* value (action, query, event) and @availability a CTLV_OP_AVAILABILITY_* value; both come from the family's generated header.\n- @pre_post flags ops that have pre/post hooks in the family's op table."
+    },
+    {
+     "title": "Op schema initialiser macros",
+     "kind": "macro",
+     "start": 302,
+     "end": 337,
+     "anchor": "#define __CTLV_OP_SCHEMA(",
+     "summary": "Build ctlv_op_schema entries for actions, queries and events, filling the size fields that apply to each type.",
+     "details": "Events have no request, are always CTLV_OP_AVAILABILITY_FIXED and set only event_record_max_len. Extra designated initialisers pass through __VA_ARGS__ (e.g. optional, pre_post)."
+    },
+    {
+     "title": "struct ctlv_family_schema and uevent limits",
+     "kind": "struct",
+     "start": 339,
+     "end": 350,
+     "anchor": "struct ctlv_family_schema {",
+     "summary": "Static description of one family: name, ID, op schema array and stub fill schemas; plus uevent size budgets.",
+     "details": "The uevent limits keep CTLV to half of UEVENT_BUFFER_SIZE and UEVENT_NUM_ENVP, leaving the rest to the device model."
+    },
+    {
+     "title": "struct ctlv_input_ref and op callback types",
+     "kind": "struct",
+     "start": 352,
+     "end": 385,
+     "anchor": "struct ctlv_input_ref {",
+     "summary": "Input reference record, the action/query/pre/post function types, struct ctlv_op and its initialiser macros.",
+     "details": "- ctlv_op holds either an action or a query handler (union) plus optional pre and post hooks.\n- Handlers get the family's private data, the op context, a const request cursor and a reply cursor.\n- CTLV_OP_* macros assemble entries from a name prefix: `name_action`, `name_query`, `name_pre`, `name_post`."
+    },
+    {
+     "title": "Family lifecycle types and stub ops",
+     "kind": "struct",
+     "start": 387,
+     "end": 411,
+     "anchor": "typedef size_t (*ctlv_family_priv_size_fn)",
+     "summary": "Family lifecycle callback types and struct ctlv_stub_ops that binds a (family, set) stub to its fill function.",
+     "details": "Lifecycle order is pre_init, init, post_init at device creation and pre_fini, fini at teardown, with priv_size giving the size of the family's private area. ctlv_stub_fill_fn writes the members for a stub into a nest cursor."
+    },
+    {
+     "title": "struct ctlv_family and root family",
+     "kind": "struct",
+     "start": 413,
+     "end": 432,
+     "anchor": "struct ctlv_family {",
+     "summary": "The registration object for a family: schema, optional parent, op handler table, family-wide hooks, lifecycle callbacks and stub ops.",
+     "details": "@parent links a derived family to a base family. The extern `ctlv_family` is the root family, defined by the core with the generated ctlv_gen output."
+    }
+   ]
+  },
+  {
+   "path": "include/uapi/linux/ctlv.h",
+   "purpose": "Userspace-visible, schema-free transport definition: TLV attribute header and ID encoding, schema kind and unit enums, the op-execution ioctl, the event record header and implementation limits. Per-family constants live in generated headers.",
+   "units": [
+    {
+     "title": "Header and struct ctlv_attr",
+     "kind": "struct",
+     "start": 439,
+     "end": 475,
+     "anchor": "SPDX-License-Identifier",
+     "summary": "License, includes, the 16-byte attribute header and 8-byte alignment macros.",
+     "details": "- `len` covers header plus payload but not the leaf's own padding; nested payloads concatenate CTLV_ALIGN(child.len) per child.\n- attr_id is __aligned_u64 so 32-bit ABIs lay out identically.\n- Scalars are native-endian; occurrences of one ID are contiguous within a root or nest."
+    },
+    {
+     "title": "Attribute flags and ID encoding",
+     "kind": "macro",
+     "start": 477,
+     "end": 507,
+     "anchor": "Set exactly on root and nested attrs",
+     "summary": "Flag bits (NESTED, FRAG_MORE, IGNORE_IF_UNKNOWN) and the 64-bit attr and op ID layouts with accessors.",
+     "details": "- Attr ID: family 63..48, group 47..32, attr 31..0. Op ID: family 63..48, op 31..0.\n- CTLV_ATTR_ROOT (0) is valid only at a message start.\n- IGNORE_IF_UNKNOWN lets a device skip a request attr whose ID its schema does not declare."
+    },
+    {
+     "title": "enum ctlv_unit and enum ctlv_schema_kind",
+     "kind": "enum",
+     "start": 509,
+     "end": 553,
+     "anchor": "/**",
+     "summary": "Units for integer payloads and the payload forms reported by op-schema-get.",
+     "details": "A payload is value * 10^scale of its unit. Both enums are append-only; kind values index ctlv_node_schema.kind in ctlv_family.h."
+    },
+    {
+     "title": "struct ctlv_op_exec and ioctl",
+     "kind": "struct",
+     "start": 555,
+     "end": 591,
+     "anchor": "/**",
+     "summary": "Argument of CTLV_IOC_OP_EXEC: op ID, request and reply buffers, lengths, and query generation/cursor for fragmented replies.",
+     "details": "- request/reply are u64 pointers for a compat-identical layout; reply_len is input only.\n- generation and cursor are query-only (zero for actions); cursor nonzero resumes a query, and the reply root carries CTLV_ATTR_F_FRAG_MORE when more remains.\n- reserved[2] must be zero and provides growth room; the ioctl is _IOWR(0xBB, 0x00)."
+    },
+    {
+     "title": "struct ctlv_event_hdr",
+     "kind": "struct",
+     "start": 593,
+     "end": 608,
+     "anchor": "/**",
+     "summary": "Header preceding one root attr in a queued event record returned by read().",
+     "details": "sequence is per open file description and advances on every eligible enqueue attempt, including dropped ones, so readers can detect loss."
+    },
+    {
+     "title": "Implementation limits",
+     "kind": "const",
+     "start": 610,
+     "end": 621,
+     "anchor": "Implementation limits",
+     "summary": "Size and depth limits of this implementation (1 MiB messages, 16 KiB errors, nest depth 32, 64 KiB default query reply, 16 MiB event queue).",
+     "details": "These are not wire-format maxima, so raising them is compatible. CTLV_MAX_NEST_DEPTH feeds CTLV_MAX_DECLARED_NEST_DEPTH in ctlv_family.h."
+    }
+   ]
+  }
+ ]
+}

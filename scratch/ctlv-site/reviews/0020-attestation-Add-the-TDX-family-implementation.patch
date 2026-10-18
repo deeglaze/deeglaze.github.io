@@ -1,0 +1,525 @@
+Hi Jiri,
+
+Some comments on the TDX provider implementation below.
+
+> From 05c726269e848ed23eb58be6dd4b40db18e7a8b3 Mon Sep 17 00:00:00 2001
+> From: Jiri Pirko <jiri@nvidia.com>
+> Date: Thu, 15 Oct 2026 16:50:53 +0200
+> Subject: [PATCH 20/20] attestation: Add the TDX family implementation
+>
+> Connect the attestation family to the native TDX service. Expose
+
+Commit message is thin for a new driver: no mention of the single-client limitation in
+`tdx_guest_client_register()` (`-EBUSY` if any other consumer exists), no mention that the module
+has no autoload path, and "preserving the existing native interfaces" is untestable prose.
+Also state that `evidence_get` holds the instance lock across a Quote (see below).
+
+> TDREPORT, Quote, MRTD and RTMR operations while preserving the existing
+> native interfaces.
+>
+> Assisted-by: Cursor: GPT-5.6 Sol
+> Assisted-by: Cursor: Claude Opus 5.5
+> Signed-off-by: Jiri Pirko <jiri@nvidia.com>
+> ---
+>  Documentation/driver-api/attestation.rst |  16 ++
+>  drivers/attestation/Kconfig              |  14 ++
+>  drivers/attestation/Makefile             |   5 +
+>  drivers/attestation/providers/tdx.c      | 277 +++++++++++++++++++++++
+>  4 files changed, 312 insertions(+)
+>  create mode 100644 drivers/attestation/providers/tdx.c
+>
+> diff --git a/Documentation/driver-api/attestation.rst b/Documentation/driver-api/attestation.rst
+> index 5ce121ded05f..f253c848e856 100644
+> --- a/Documentation/driver-api/attestation.rst
+> +++ b/Documentation/driver-api/attestation.rst
+> @@ -46,3 +46,19 @@ CTLV first drains userspace operations.  The base ``pre_fini`` callback then
+>  withdraws the instance from the kernel registry while provider state and CTLV
+>  event emission remain available.  CTLV stops events only after that callback
+>  returns; provider and base ``fini`` callbacks may then release native storage.
+> +
+> +TDX provider
+> +============
+> +
+> +``CONFIG_ATTESTATION_TDX`` registers a ``ctlv-attestation-tdx`` instance for
+> +the native TDX guest service.  MRTD has stable MR ID 0 and is read-only.
+> +RTMR0 through RTMR3 have IDs 1 through 4 and are readable and extendable with
+> +SHA-384.
+> +
+> +``EVIDENCE_GET`` supports complete raw TDREPORT and Quote objects.  Both
+> +formats cryptographically bind all architectural TDX measurement registers,
+> +so successful replies carry the matching MR-journal boundary.  The provider
+> +exposes no verdict or device-security operation.
+> +
+> +The provider consumes only ``<linux/tdx-guest.h>``.  It does not call the TDX
+
+The doc claims "successful replies carry the matching MR-journal boundary". The journal
+(`att->log->generation`) only advances for extends that go through this CTLV instance. RTMRs are
+also extendable through the native TSM-MR sysfs and the TDX misc ioctl, which this very
+paragraph says remain available "independently", and those bypass the journal. So the
+generation reported alongside a TDREPORT/Quote can be stale relative to the RTMR values actually
+bound in the report, and the journal cannot be replayed to the reported RTMR values. Either
+document the limitation or have the provider detect/resync (e.g. `mr_read` before and after).
+
+> +misc ioctl, configfs TSM-report, or TSM-MR sysfs frontends.
+> diff --git a/drivers/attestation/Kconfig b/drivers/attestation/Kconfig
+> index e2fb4b4205fe..139bcc710019 100644
+> --- a/drivers/attestation/Kconfig
+> +++ b/drivers/attestation/Kconfig
+> @@ -10,3 +10,17 @@ menuconfig ATTESTATION
+>  	  translate the common operations to their native service.
+>  
+>  	  If you are unsure, say N.
+> +
+> +if ATTESTATION
+> +
+> +config ATTESTATION_TDX
+> +	tristate "TDX attestation provider"
+> +	depends on TDX_GUEST_DRIVER
+
+Missing 'depends on X86'/etc. is covered by `TDX_GUEST_DRIVER`, fine. But the module has no
+device table/`MODULE_ALIAS` or softdep, and tdx-guest never `request_module()`s it, so with
+=m nothing ever loads attestation-tdx automatically; users must modprobe by hand. Also,
+the native driver supports only a single client; building another provider consumer (e.g. a
+different out-of-tree client) makes this fail with `-EBUSY` at module load. Mention in help.
+
+> +	help
+> +	  Exposes TDREPORT, Quote, MRTD and RTMR operations through the common
+> +	  attestation CTLV family. The native TDX misc, TSM-report and TSM-MR
+> +	  interfaces remain available independently.
+> +
+> +	  If you are unsure, say N.
+> +
+> +endif # ATTESTATION
+> diff --git a/drivers/attestation/Makefile b/drivers/attestation/Makefile
+> index e520fee2e90d..d56df9adaa75 100644
+> --- a/drivers/attestation/Makefile
+> +++ b/drivers/attestation/Makefile
+> @@ -3,3 +3,8 @@ obj-$(CONFIG_ATTESTATION) += attestation.o
+>  
+>  attestation-y := core/core.o core/ctlv.o core/events.o core/mr.o \
+>  		 generated/ctlv_attestation_gen.o
+> +
+> +obj-$(CONFIG_ATTESTATION_TDX) += attestation-tdx.o
+> +
+> +attestation-tdx-y := providers/tdx.o \
+> +		     generated/ctlv_attestation_tdx_gen.o
+> diff --git a/drivers/attestation/providers/tdx.c b/drivers/attestation/providers/tdx.c
+> new file mode 100644
+> index 000000000000..9b41b985c783
+> --- /dev/null
+> +++ b/drivers/attestation/providers/tdx.c
+> @@ -0,0 +1,277 @@
+> +// SPDX-License-Identifier: GPL-2.0-only
+> +#include <crypto/sha2.h>
+
+Unused includes: `crypto/sha2.h` (nothing here uses `SHA384_*` directly; sizeof is used) and
+`linux/err.h` (no `IS_ERR`/`ERR_PTR` use). Missing: `linux/array_size.h` for `ARRAY_SIZE`, and
+linux/`hash_info` (`HASH_ALGO_SHA384` is reaching you via `attestation.h` transitively).
+
+> +#include <linux/attestation.h>
+> +#include <linux/ctlv.h>
+> +#include <linux/err.h>
+> +#include <linux/module.h>
+> +#include <linux/slab.h>
+> +#include <linux/tdx-guest.h>
+> +
+> +#include "../generated/ctlv_attestation_tdx_gen.h"
+> +
+> +struct attestation_tdx_init_info {
+
+`struct attestation_tdx_init_info` and `struct attestation_tdx` hold the identical two members,
+and init just copies one into the other. The `init_info` is a stack variable in
+`attestation_tdx_add()` that lives for the duration of `ctlv_create()`; init could simply copy, but
+then the two structs are redundant. Either drop `init_info` and pass the ops through a
+single struct, or document why they must differ. The cached `parent_dev`/ops are also not
+needed per call if `ctlv_device_parent()` is already available from the core (the core uses it for
+the `parent_exists` check).
+
+> +	struct device *parent_dev;
+> +	const struct tdx_guest_ops *ops;
+> +};
+> +
+> +struct attestation_tdx {
+> +	struct device *parent_dev;
+> +	const struct tdx_guest_ops *ops;
+> +};
+> +
+> +static const enum hash_algo attestation_tdx_algorithms[] = {
+> +	HASH_ALGO_SHA384,
+> +};
+> +
+> +static const struct attestation_mr_props attestation_tdx_mrs[] = {
+> +	{
+> +		.id = 0,
+> +		.name = "mrtd",
+> +		.algorithms = attestation_tdx_algorithms,
+> +		.algorithms_count = ARRAY_SIZE(attestation_tdx_algorithms),
+> +		.readable = true,
+> +	},
+> +	{
+> +		.id = 1,
+> +		.name = "rtmr0",
+
+The five MR property entries are copy-pasted. .`register_index` (0..3) and the MR id (1..4) are
+both declared here, yet `mr_read()` uses a separate `native_mrs[]` table and `mr_extend()` hard-codes
+'`mr_id` - 1' and the literal range 1..4. Three independent encodings of the same mapping; a
+future edit to one silently desyncs the others. Look up the props entry
+(&`attestation_tdx_mrs[mr_id]`) and use .`register_index`, or at least add `BUILD_BUG_ONs`.
+Also the open-coded 'id' numbers 0..4 should be an enum.
+
+> +		.algorithms = attestation_tdx_algorithms,
+> +		.algorithms_count = ARRAY_SIZE(attestation_tdx_algorithms),
+> +		.has_register_index = true,
+> +		.register_index = 0,
+> +		.readable = true,
+> +		.extendable = true,
+> +	},
+> +	{
+> +		.id = 2,
+> +		.name = "rtmr1",
+> +		.algorithms = attestation_tdx_algorithms,
+> +		.algorithms_count = ARRAY_SIZE(attestation_tdx_algorithms),
+> +		.has_register_index = true,
+> +		.register_index = 1,
+> +		.readable = true,
+> +		.extendable = true,
+> +	},
+> +	{
+> +		.id = 3,
+> +		.name = "rtmr2",
+> +		.algorithms = attestation_tdx_algorithms,
+> +		.algorithms_count = ARRAY_SIZE(attestation_tdx_algorithms),
+> +		.has_register_index = true,
+> +		.register_index = 2,
+> +		.readable = true,
+> +		.extendable = true,
+> +	},
+> +	{
+> +		.id = 4,
+> +		.name = "rtmr3",
+> +		.algorithms = attestation_tdx_algorithms,
+> +		.algorithms_count = ARRAY_SIZE(attestation_tdx_algorithms),
+> +		.has_register_index = true,
+> +		.register_index = 3,
+> +		.readable = true,
+> +		.extendable = true,
+> +	},
+> +};
+> +
+> +static const struct attestation_evidence_supported_object
+> +attestation_tdx_evidence_objects[] = {
+> +	{
+> +		.format = "tdx-tdreport-1.0",
+> +		.max_length = TDX_GUEST_REPORT_LEN,
+> +		.binds_mrs = true,
+> +	},
+> +	{
+> +		.format = "tdx-quote-1.0",
+> +		.max_length = TDX_GUEST_QUOTE_MAX_LEN,
+
+The core (`decode_objects`) rejects with `-EMSGSIZE` any request whose output blob is smaller than
+`max_length`, i.e. a client must supply a ~128 KiB blob to get a Quote regardless of its real
+size (typically 5-8 KiB), and in total `max_total_output_length` == `QUOTE_MAX_LEN` means a
+TDREPORT+Quote pair can never be requested together. That is probably intended, but then
+the '`objects_count` != 1' check in the provider is partly redundant (see below).
+
+> +		.binds_mrs = true,
+> +	},
+> +};
+> +
+> +static const struct attestation_evidence_caps attestation_tdx_evidence_caps = {
+> +	.min_challenge_length = TDX_GUEST_REPORTDATA_LEN,
+> +	.max_challenge_length = TDX_GUEST_REPORTDATA_LEN,
+> +	.max_total_output_length = TDX_GUEST_QUOTE_MAX_LEN,
+> +	.objects = attestation_tdx_evidence_objects,
+> +	.objects_count = ARRAY_SIZE(attestation_tdx_evidence_objects),
+> +};
+> +
+> +static int
+> +attestation_tdx_evidence_get(struct attestation *att,
+> +			     const struct attestation_evidence_request *request,
+> +			     struct attestation_evidence_result *result)
+> +{
+> +	const struct attestation_evidence_object_request *object;
+> +	struct attestation_tdx *tdx = ctlv_priv_child(att);
+> +	size_t length;
+> +	void *buffer;
+> +	int ret;
+> +
+> +	if (request->objects_count != 1)
+
+`objects_count` == 0 is reachable (empty request -> `kcalloc(0)` -> `ZERO_SIZE_PTR`, accepted by the
+core) and returns `-EOPNOTSUPP`, which is the wrong errno for a malformed request (`-EINVAL`);
+`objects_count` == 2 is already rejected by the core with `-E2BIG` because
+sum of `max_length` > `max_total_output_length`. So this check is only meaningful for 0 and
+should return `-EINVAL`, and should probably live in the core.
+
+> +		return -EOPNOTSUPP;
+> +	object = &request->objects[0];
+> +	buffer = kvmalloc(object->supported_object->max_length, GFP_KERNEL);
+
+Every TDREPORT request (1 KiB) is fine, but every Quote request does a 128 KiB kvmalloc plus a
+memcpy into the destination blob, even though the core already hands us a resolved
+output blob of at least `max_length` bytes. Why the bounce buffer? `ctlv_blob` has a write helper
+but if it can be mapped/pinned this is a needless allocation on a path that holds the global
+instance lock. Also kvmalloc leaves the buffer uninitialised: if a native op returns 0 with
+*`out_length` > what it filled, stale heap goes to userspace. The provider trusts 'length' from
+the callee without checking length <= `max_length` before `ctlv_blob_write` (the core checks only
+afterwards, via `object_lengths`, and after the data has already been written into the blob).
+Please add 'if (length > `max_length`) ret = `-EIO`'. kvzalloc would be a cheap hardening.
+
+> +	if (!buffer)
+> +		return -ENOMEM;
+> +	if (object->supported_object == &attestation_tdx_evidence_objects[0])
+> +		ret = tdx->ops->report_get(tdx->parent_dev,
+
+Indentation of the continuation lines (tab-only, not aligned to the open parenthesis)
+violates kernel style; checkpatch `--strict` will emit 'Alignment should match open
+parenthesis' for this call, the `quote_get` call, and the `mr_read`/`rtmr_extend` returns below.
+
+> +			request->challenge,
+> +			request->challenge_length, buffer,
+> +			object->supported_object->max_length, &length);
+> +	else if (object->supported_object ==
+> +		 &attestation_tdx_evidence_objects[1])
+
+Dispatching on pointer identity into the array (objects[0], objects[1]) is fragile and
+duplicates knowledge of the table order; the final 'else ret = `-EOPNOTSUPP`' is unreachable
+because the core only passes entries found in `caps->objects` (and there are exactly two).
+Dead branch. Use a per-object callback/enum (e.g. add a .get pointer to a provider-private
+wrapper table) or index = `supported_object` - objects.
+
+> +		ret = tdx->ops->quote_get(tdx->parent_dev,
+> +			request->challenge,
+> +			request->challenge_length, buffer,
+> +			object->supported_object->max_length, &length);
+> +	else
+> +		ret = -EOPNOTSUPP;
+> +	if (!ret)
+> +		ret = ctlv_blob_write(object->output, 0, buffer, length);
+
+On the Quote/TDREPORT paths 'length' is never validated as > 0; a zero-length success reply is
+passed on as a valid evidence object. Also, the two consecutive 'if (!ret)' blocks could be one.
+
+> +	if (!ret)
+> +		result->object_lengths[0] = length;
+> +	kvfree(buffer);
+> +	return ret;
+> +}
+> +
+> +static int attestation_tdx_mr_read(struct attestation *att, unsigned int mr_id,
+
+This runs under `att->lock` (taken by `ctlv_attestation_tdx_op_pre` via the parent). The same is
+true for `evidence_get`, which on TDX performs a TDVMCALL GetQuote that can block for
+seconds (host/QGS round trip, plus tdx-guest's own timeout). Every other op on the instance,
+including `mr_read`/`mr_log_get`, is blocked for that time, and the lock is held in a context
+that may sleep uninterruptibly. Please document or release the lock for `evidence_get`.
+
+> +				   struct attestation_digest_set *values)
+> +{
+> +	static const enum tdx_guest_mr native_mrs[] = {
+> +		TDX_GUEST_MR_MRTD,
+> +		TDX_GUEST_MR_RTMR0,
+> +		TDX_GUEST_MR_RTMR1,
+> +		TDX_GUEST_MR_RTMR2,
+> +		TDX_GUEST_MR_RTMR3,
+> +	};
+> +	struct attestation_tdx *tdx = ctlv_priv_child(att);
+> +
+> +	if (mr_id >= ARRAY_SIZE(native_mrs) ||
+
+Redundant checks: the core only calls `mr_read` for MR ids it allocated from `provider->mrs`
+(ids 0..4) and with a digest set built from `props->algorithms` (exactly one SHA384 entry), so
+none of the three conditions can be true. `-EINVAL` for a programming error should at most be
+`WARN_ON_ONCE`; as is it is dead code.
+
+> +	    values->values_count != 1 ||
+> +	    values->values[0].algorithm != HASH_ALGO_SHA384)
+> +		return -EINVAL;
+> +	return tdx->ops->mr_read(tdx->parent_dev, native_mrs[mr_id],
+> +		values->values[0].data);
+> +}
+> +
+> +static int
+> +attestation_tdx_mr_extend(struct attestation *att, unsigned int mr_id,
+> +			  const struct attestation_digest_set *values)
+> +{
+> +	struct attestation_tdx *tdx = ctlv_priv_child(att);
+> +
+> +	if (mr_id < 1 || mr_id > 4)
+
+Also unreachable (core checks `props->extendable`, and only ids 1..4 are extendable) and
+inconsistent with `mr_read()`, which returns `-EINVAL` for an out-of-range id while this returns
+`-EOPNOTSUPP`. The magic numbers 1 and 4 should derive from the table.
+
+> +		return -EOPNOTSUPP;
+> +	if (values->values_count != 1 ||
+> +	    values->values[0].algorithm != HASH_ALGO_SHA384)
+> +		return -EINVAL;
+> +	return tdx->ops->rtmr_extend(tdx->parent_dev, mr_id - 1,
+> +				     values->values[0].data);
+> +}
+> +
+> +static const struct attestation_provider attestation_tdx_provider = {
+> +	.evidence_get = attestation_tdx_evidence_get,
+> +	.mr_read = attestation_tdx_mr_read,
+> +	.mr_extend = attestation_tdx_mr_extend,
+> +	.evidence_caps = &attestation_tdx_evidence_caps,
+> +	.mrs = attestation_tdx_mrs,
+> +	.mrs_count = ARRAY_SIZE(attestation_tdx_mrs),
+> +};
+> +
+> +size_t ctlv_attestation_tdx_priv_size(void)
+> +{
+> +	return sizeof(struct attestation_tdx);
+> +}
+> +
+> +const void *ctlv_attestation_tdx_pre_init(const void *init_info)
+
+`init_info` is ignored here, so the provider is returned to the parent before `init()` has
+validated `parent_dev`/ops. That is only safe because the parent's `init()` (which calls
+provider validation) is run before the child's; please state that ordering in a comment. The
+'info' `NULL` check in `ctlv_attestation_tdx_init()` then is the only guard.
+
+> +{
+> +	return &attestation_tdx_provider;
+> +}
+> +
+> +int ctlv_attestation_tdx_init(struct ctlv_device *ctlvdev,
+> +			      const void *init_info, void *priv)
+> +{
+> +	const struct attestation_tdx_init_info *info = init_info;
+> +	struct attestation_tdx *tdx = priv;
+> +
+> +	if (!info || !info->parent_dev || !info->ops)
+
+info is always the local struct from `attestation_tdx_add()`, and `parent_dev`/ops come from
+the native driver's own non-`NULL` values; this validation can never fail. Also `ops->info_get`,
+`report_get`, `quote_get`, `mr_read` and `rtmr_extend` are used unconditionally without any `NULL` check
+(fine if tdx-guest guarantees them, but then the checks above are inconsistent).
+
+> +		return -EINVAL;
+> +	tdx->parent_dev = info->parent_dev;
+> +	tdx->ops = info->ops;
+> +	return 0;
+> +}
+> +
+> +void ctlv_attestation_tdx_fini(struct ctlv_device *ctlvdev, void *priv)
+
+An empty `fini()`: every line must justify itself. If the generated descriptor requires all
+hooks, the generator should accept `NULL` (then drop this and the .fini initialiser); if not,
+this is dead code. Same for the unused ctlv/request parameters below.
+
+> +{
+> +}
+> +
+> +int ctlv_attestation_tdx_op_pre(void *priv, struct ctlv_op_ctx *ctx)
+> +{
+> +	return ctlv_attestation_op_pre(ctlv_priv_parent(priv), ctx);
+> +}
+> +
+> +void ctlv_attestation_tdx_op_post(void *priv, struct ctlv_op_ctx *ctx)
+> +{
+> +	ctlv_attestation_op_post(ctlv_priv_parent(priv), ctx);
+> +}
+> +
+> +int ctlv_attestation_tdx_device_info_fill(void *priv,
+> +					  struct ctlv_op_ctx *ctx,
+> +					  const struct ctlv_cursor *request,
+> +					  struct ctlv_cursor *nest)
+> +{
+> +	struct attestation_tdx *tdx = priv;
+> +	const struct tdx_guest_info *info =
+
+The local 'info' variable shadows the naming of the init-info above; fine. Note
+`ops->info_get()` returns `NULL` when the device is no longer valid; `-ENODEV` is right, but
+tdx-guest's detach calls `client->remove()` (`ctlv_destroy`, which drains ops) so a `NULL` here
+should be impossible; confirm, else it is dead.
+
+> +		tdx->ops->info_get(tdx->parent_dev);
+> +	bool ok;
+> +
+> +	if (!info)
+> +		return -ENODEV;
+> +	ok = ctlv_attestation_tdx_info_mrconfigid_put(nest, info->mrconfigid,
+
+Using 'ok &= ...' on a bool relies on the non-short-circuiting & to keep appending after a
+failure, which is pointless: after the first failure the remaining puts do wasted work. Use &&
+(or early return). The message tells the client `-EMSGSIZE`, and the partial nest is
+presumably discarded by the core; please confirm that on error the half-written nest is rolled
+back, otherwise a short device-info reply leaks out.
+
+> +						      sizeof(info->mrconfigid));
+> +	ok &= ctlv_attestation_tdx_info_mrowner_put(nest, info->mrowner,
+> +						    sizeof(info->mrowner));
+> +	ok &= ctlv_attestation_tdx_info_mrownerconfig_put(nest,
+> +							   info->mrownerconfig,
+> +							   sizeof(info->mrownerconfig));
+> +	return ok ? 0 : -EMSGSIZE;
+> +}
+> +
+> +static void *attestation_tdx_add(struct device *parent_dev,
+
+`ctlv_create()` returns an `ERR_PTR` on failure (tdx-guest checks `IS_ERR`), but on success
+is the pointer the instance used as `client_priv` for `ctlv_destroy()`. Fine. There is no `pr_*`
+/`dev_err` on failure so a failed probe (e.g. `-EEXIST` from the `parent_exists` check) gives
+no diagnosis.
+
+> +				 const struct tdx_guest_ops *ops)
+> +{
+> +	struct attestation_tdx_init_info info = {
+> +		.parent_dev = parent_dev,
+> +		.ops = ops,
+> +	};
+> +
+> +	return ctlv_create(parent_dev, &ctlv_attestation_tdx_family,
+> +			   &info);
+> +}
+> +
+> +static void attestation_tdx_remove(void *client_priv)
+> +{
+> +	ctlv_destroy(client_priv);
+> +}
+> +
+> +static const struct tdx_guest_client attestation_tdx_client = {
+
+Because `tdx_guest_client_register()` attaches only one client system-wide, loading this module
+makes any other consumer fail with `-EBUSY`; this is a global resource grab by a driver
+that, per the Kconfig help, claims the native interfaces 'remain available independently'.
+
+> +	.add = attestation_tdx_add,
+> +	.remove = attestation_tdx_remove,
+> +};
+> +
+> +static int __init attestation_tdx_init_module(void)
+> +{
+> +	return tdx_guest_client_register(&attestation_tdx_client);
+> +}
+> +
+> +static void __exit attestation_tdx_exit_module(void)
+> +{
+> +	tdx_guest_client_unregister(&attestation_tdx_client);
+> +}
+> +
+> +module_init(attestation_tdx_init_module);
+> +module_exit(attestation_tdx_exit_module);
+> +MODULE_DESCRIPTION("TDX attestation provider");
+> +MODULE_LICENSE("GPL");
+> +MODULE_IMPORT_NS("ATTESTATION");
+> +MODULE_IMPORT_NS("CTLV");
+> +MODULE_IMPORT_NS("TDX_GUEST");
+
+> -- 
+> 2.55.0
+>
+
+Summary:
+- `evidence_get`: trusts native-reported 'length' before copying into the destination blob (no
+  length <= `max_length` check, uninitialised kvmalloc bounce buffer), 128 KiB bounce alloc for
+  every Quote, `objects_count`==0 returns the wrong errno, unreachable else branch.
+- A Quote (blocking TDVMCALL) runs under the per-instance lock, stalling all other ops.
+- Doc claims the MR-journal generation matches the evidence, but native TSM-MR/ioctl extends
+  bypass the journal, so it can be stale.
+- Triple encoding of the MR id mapping (props, `native_mrs[]`, `mr_id-1`) plus redundant,
+  unreachable bounds checks in `mr_read`/`mr_extend`/init; empty fini; duplicate structs;
+  unused includes; checkpatch alignment violations; no module autoload; single-client `-EBUSY`.
