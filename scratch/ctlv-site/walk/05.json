@@ -1,0 +1,334 @@
+{
+ "patch": 5,
+ "title": "ctlv: Prepare message input handling",
+ "overview": "Introduces the drivers/ctlv core module skeleton (Kconfig, Makefile, MAINTAINERS) and the input side of message handling: bounds-checked walking of TLV nests, a per-request index of attrs, and validated accessors. Generated family readers use the CTLV_IN_* macros in include/linux/ctlv_family.h, which call exported functions in message.c; message.h and internal.h are private to the core. CONFIG_CTLV is not yet wired into drivers/Kconfig or drivers/Makefile.",
+ "files": [
+  {
+   "path": "MAINTAINERS",
+   "purpose": "Adds the new driver directory to the CTLV maintainer entry.",
+   "units": [
+    {
+     "title": "Add drivers/ctlv/ to CTLV entry",
+     "kind": "config",
+     "start": 37,
+     "end": 37,
+     "anchor": "F:\tdrivers/ctlv/",
+     "summary": "The core's source directory is now covered by the CTLV maintainers."
+    }
+   ]
+  },
+  {
+   "path": "drivers/ctlv/Kconfig",
+   "purpose": "Defines the tristate CTLV option for the core module; not yet sourced from drivers/Kconfig.",
+   "units": [
+    {
+     "title": "menuconfig CTLV",
+     "kind": "config",
+     "start": 47,
+     "end": 58,
+     "anchor": "SPDX",
+     "summary": "Tristate option describing what the core owns (device lifetime, TLV format, validation, replies, events, introspection)."
+    }
+   ]
+  },
+  {
+   "path": "drivers/ctlv/Makefile",
+   "purpose": "Builds the core as a single ctlv.o module from its object files.",
+   "units": [
+    {
+     "title": "ctlv.o composite",
+     "kind": "build",
+     "start": 66,
+     "end": 68,
+     "anchor": "obj-$(CONFIG_CTLV)",
+     "summary": "Builds ctlv.ko from message.o; later patches add more objects to ctlv-y."
+    }
+   ]
+  },
+  {
+   "path": "drivers/ctlv/internal.h",
+   "purpose": "Core-private types shared among the core's .c files: per-op entries, error state, and the per-operation context. Not visible to families.",
+   "units": [
+    {
+     "title": "Header, includes and constants",
+     "kind": "const",
+     "start": 75,
+     "end": 94,
+     "anchor": "SPDX-License-Identifier",
+     "summary": "Includes the family and message headers and defines the error message size and the 'no availability state' sentinel."
+    },
+    {
+     "title": "struct ctlv_op_entry",
+     "kind": "struct",
+     "start": 96,
+     "end": 103,
+     "anchor": "struct ctlv_op_entry {",
+     "summary": "Per-device runtime view of one op: its schema, the family's binding, private data, sizes, availability state index and absent flag."
+    },
+    {
+     "title": "struct ctlv_error",
+     "kind": "struct",
+     "start": 105,
+     "end": 113,
+     "anchor": "struct ctlv_error {",
+     "summary": "Structured error detail (reason, message, offending attr and nest offsets, missing attr id, generations) collected for the reply."
+    },
+    {
+     "title": "struct ctlv_query_fragment",
+     "kind": "struct",
+     "start": 115,
+     "end": 123,
+     "anchor": "struct ctlv_query_fragment {",
+     "summary": "State for fragmented query replies: generation, cursor positions, progress and result."
+    },
+    {
+     "title": "struct ctlv_op_ctx",
+     "kind": "struct",
+     "start": 125,
+     "end": 140,
+     "anchor": "struct ctlv_op_ctx {",
+     "summary": "Everything for one operation invocation: family, op entry, request and output messages with root cursors, the deepest output cursor, fragment and error state.",
+     "details": "The request ctlv_msg's `ctx` back-pointer (message.h) refers to this structure."
+    }
+   ]
+  },
+  {
+   "path": "drivers/ctlv/message.c",
+   "purpose": "Implements TLV nest walking, root cursor setup, cross-checking of cursors against the request index, and the exported ctlv_input_attr/ctlv_attr_* accessors used by generated readers. Callers are the CTLV_IN_* macros; the request validator (later) builds the index it consumes.",
+   "units": [
+    {
+     "title": "Header and includes",
+     "kind": "const",
+     "start": 147,
+     "end": 167,
+     "anchor": "SPDX-License-Identifier",
+     "summary": "License and includes for the message primitives."
+    },
+    {
+     "title": "ctlv_message_next()",
+     "kind": "function",
+     "start": 169,
+     "end": 198,
+     "anchor": "enum ctlv_message_step ctlv_message_next(",
+     "summary": "Advances to the next child attr of a nest, returning ATTR, END or BAD.",
+     "details": "- Starts at the first child or after the previous child's aligned length.\n- Checks the remaining room, then the unaligned length, then the aligned length, so lengths never overflow past the nest.\n- Used for walking untrusted nests while indexing."
+    },
+    {
+     "title": "ctlv_message_offset() and ctlv_message_root()",
+     "kind": "function",
+     "start": 200,
+     "end": 216,
+     "anchor": "u32 ctlv_message_offset(",
+     "summary": "Computes an attr's byte offset from the message root and initialises the root cursor of a message.",
+     "details": "For a request with an index, the root cursor's nest scope starts at the first scope of nest 0 (the root nest)."
+    },
+    {
+     "title": "ctlv_message_nest_index_ok()",
+     "kind": "function",
+     "start": 218,
+     "end": 236,
+     "anchor": "static bool ctlv_message_nest_index_ok(",
+     "summary": "Verifies that a nest cursor agrees with the index entry its scope refers to (offset, tree, node)."
+    },
+    {
+     "title": "Scope and ref consistency helpers",
+     "kind": "function",
+     "start": 238,
+     "end": 260,
+     "anchor": "static bool ctlv_message_input_scope_ok(",
+     "summary": "Checks scope slot ranges against the index and resolves a generated input ref to its schema node, checking attr id and kind.",
+     "details": "The refs come from generated code (CTLV_IN_REF), so mismatches indicate a core/generator inconsistency and are guarded with WARN_ON_ONCE."
+    },
+    {
+     "title": "ctlv_message_cursor_index()",
+     "kind": "function",
+     "start": 262,
+     "end": 320,
+     "anchor": "static const struct ctlv_message_input_slot *",
+     "summary": "Looks up the index slot for a cursor and validates that cursor, scope, schema node and attr offset all agree.",
+     "details": "- Returns the slot even for an empty (attr NULL) cursor.\n- For a positioned cursor, checks attr id, parent nest offset, and that the attr lies within the slot's offset range.\n- For nest-kind nodes, checks the nested scope matches; otherwise requires no nested scope.\n- Central guard used by ctlv_input_cursor, ctlv_attr_next, ctlv_attr_ok and payload access."
+    },
+    {
+     "title": "ctlv_message_input_rebind()",
+     "kind": "function",
+     "start": 322,
+     "end": 348,
+     "anchor": "bool ctlv_message_input_rebind(",
+     "summary": "Re-targets a nest cursor to another schema tree and node among the scopes indexed for the same nest instance.",
+     "details": "Supports nests whose content is interpreted under a different schema node; returns false if no scope for that tree and node was indexed."
+    },
+    {
+     "title": "ctlv_input_attr()",
+     "kind": "function",
+     "start": 350,
+     "end": 399,
+     "anchor": "struct ctlv_cursor *ctlv_input_attr(",
+     "summary": "Positions a cursor on the first attr of a given slot within a nest, using the request index.",
+     "details": "- Always returns the cursor; on any failure it is left empty (attr NULL) so readers see 'absent'.\n- On success it points at the slot's first_offset and carries the child node, depth and scope links.\n- For nest children, also records the first nested scope.\n- Called by the CTLV_IN_* macros and CTLV_IN_FOR_EACH."
+    },
+    {
+     "title": "ctlv_input_cursor()",
+     "kind": "function",
+     "start": 401,
+     "end": 419,
+     "anchor": "bool ctlv_input_cursor(",
+     "summary": "Checks that a cursor produced by iteration belongs to the slot named by a ref.",
+     "details": "Used by the CTLV_IN_EACH_* getters before reading a value."
+    },
+    {
+     "title": "ctlv_attr_next()",
+     "kind": "function",
+     "start": 421,
+     "end": 459,
+     "anchor": "void ctlv_attr_next(",
+     "summary": "Advances an iteration cursor to the next repeated attr in the same slot, or empties it at the slot end.",
+     "details": "For nest-kind attrs it follows the nest chain (`next`) to move the nested scope with the attr. The final cursor is re-validated."
+    },
+    {
+     "title": "ctlv_attr_ok()",
+     "kind": "function",
+     "start": 461,
+     "end": 465,
+     "anchor": "bool ctlv_attr_ok(",
+     "summary": "True if the cursor points at an attr and is consistent with the index; the loop condition for CTLV_IN_FOR_EACH."
+    },
+    {
+     "title": "Payload access helpers",
+     "kind": "function",
+     "start": 467,
+     "end": 493,
+     "anchor": "The payload, checked",
+     "summary": "Return an attr's payload after confirming the schema node kind is one the reader accepts and, for fixed-size readers, that the length matches.",
+     "details": "Kinds are passed as a BIT() mask. A length mismatch against a validated kind would be a core bug rather than a user error."
+    },
+    {
+     "title": "Typed attr readers",
+     "kind": "function",
+     "start": 495,
+     "end": 544,
+     "anchor": "u64 ctlv_attr_u64(",
+     "summary": "Exported readers for u64 (uint, enum, flags), s64, bool, string and binary payloads, returning zero/NULL for absent or mismatched cursors.",
+     "details": "ctlv_attr_string() requires a non-empty NUL-terminated payload; ctlv_attr_binary() always sets *len, to 0 on failure. All are in namespace CTLV."
+    },
+    {
+     "title": "Trailing comment",
+     "kind": "doc",
+     "start": 546,
+     "end": 549,
+     "anchor": "/*",
+     "summary": "Comment at the end of the file about measuring room before writing; its function arrives in a later patch."
+    }
+   ]
+  },
+  {
+   "path": "drivers/ctlv/message.h",
+   "purpose": "Private representation of a message and its request index, plus the nest-walking interface; included by internal.h and the core .c files.",
+   "units": [
+    {
+     "title": "Header, includes and index sentinel",
+     "kind": "const",
+     "start": 556,
+     "end": 570,
+     "anchor": "SPDX-License-Identifier",
+     "summary": "Includes and the CTLV_MESSAGE_INPUT_INDEX_NONE sentinel meaning 'no scope/nest'."
+    },
+    {
+     "title": "Request index structures",
+     "kind": "struct",
+     "start": 572,
+     "end": 608,
+     "anchor": "Attr identity",
+     "summary": "Slot, scope, nest and index structs forming a flat, offset-based index of a request's attrs.",
+     "details": "- slot: per schema child, the first/end offsets, count, first excess offset and nest chain.\n- scope: one schema node interpretation of a nest and its range of slots.\n- nest: one nest instance in the message, its scopes and next sibling.\n- index: the three growable arrays with counts and capacities."
+    },
+    {
+     "title": "struct ctlv_msg",
+     "kind": "struct",
+     "start": 610,
+     "end": 619,
+     "anchor": "struct ctlv_msg {",
+     "summary": "A message buffer (request or output) with its root attr, length, schema tree, family, owning context, optional input index and poison error."
+    },
+    {
+     "title": "enum ctlv_message_step",
+     "kind": "enum",
+     "start": 621,
+     "end": 625,
+     "anchor": "enum ctlv_message_step {",
+     "summary": "Result of one step of nest walking: ATTR, END, or BAD."
+    },
+    {
+     "title": "Message function prototypes",
+     "kind": "function",
+     "start": 627,
+     "end": 634,
+     "anchor": "enum ctlv_message_step ctlv_message_next(",
+     "summary": "Declares the walking, offset, root and rebind functions, and ctlv_message_index_free() (implemented in a later patch)."
+    },
+    {
+     "title": "Payload inline helpers",
+     "kind": "function",
+     "start": 636,
+     "end": 645,
+     "anchor": "static inline u32 ctlv_message_attr_payload_len(",
+     "summary": "Payload length and pointer derived from the attr header."
+    }
+   ]
+  },
+  {
+   "path": "include/linux/ctlv_family.h",
+   "purpose": "Family-facing header; this patch adds the input reader API and the CTLV_IN_* macros that generated family code expands into typed getters over ctlv_input_ref.",
+   "units": [
+    {
+     "title": "Input accessor prototypes",
+     "kind": "function",
+     "start": 656,
+     "end": 667,
+     "anchor": "struct ctlv_cursor *",
+     "summary": "Declares the exported input functions implemented in drivers/ctlv/message.c."
+    },
+    {
+     "title": "CTLV_IN_REF",
+     "kind": "macro",
+     "start": 669,
+     "end": 679,
+     "anchor": "#define CTLV_IN_REF(",
+     "summary": "Generates a `<name>_ref()` inline returning the constant ctlv_input_ref (tree, attr id, node, slot, kind) for one attr."
+    },
+    {
+     "title": "CTLV_IN_FOR_EACH",
+     "kind": "macro",
+     "start": 681,
+     "end": 685,
+     "anchor": "#define CTLV_IN_FOR_EACH(",
+     "summary": "Loop over every instance of a repeated attr in a nest using ctlv_input_attr, ctlv_attr_ok and ctlv_attr_next."
+    },
+    {
+     "title": "CTLV_IN_HAS",
+     "kind": "macro",
+     "start": 687,
+     "end": 694,
+     "anchor": "#define CTLV_IN_HAS(",
+     "summary": "Generates `<name>_present()`, true if the attr occurs in the nest."
+    },
+    {
+     "title": "Single-attr getter macros",
+     "kind": "macro",
+     "start": 696,
+     "end": 748,
+     "anchor": "#define CTLV_IN_U64(",
+     "summary": "Generate `<name>_get()` for u64, s64, bool, string, binary and nest attrs, each locating the attr through its ref and delegating to ctlv_attr_*.",
+     "details": "Absent attrs yield 0/false/NULL (and an empty nest cursor)."
+    },
+    {
+     "title": "Iteration getter macros",
+     "kind": "macro",
+     "start": 750,
+     "end": 792,
+     "anchor": "#define CTLV_IN_EACH_U64(",
+     "summary": "Generate `<name>_get()` readers for a cursor produced by CTLV_IN_FOR_EACH, first checking with ctlv_input_cursor that the cursor belongs to that attr."
+    }
+   ]
+  }
+ ]
+}

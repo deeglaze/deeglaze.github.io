@@ -1,0 +1,218 @@
+{
+ "patch": 19,
+ "title": "attestation: Add the TDX family specification and generated files",
+ "overview": "Declares the ctlv-attestation-tdx family (ID 2), a child of ctlv-attestation that fills the device-info extension point with TDX-specific measurement IDs. The YAML spec is the source; the ABI snapshot, registries and the three generated files (UAPI header, kernel header, kernel source) are derived from it. The generated descriptor references provider hooks that patch 20 implements.",
+ "files": [
+  {
+   "path": "Documentation/ctlv/abi/ctlv-attestation-tdx.yaml",
+   "purpose": "Checked-in ABI snapshot of the family written by `make -C tools/ctlv abi-update`; the checker compares the live spec against it so UAPI changes are reviewed.",
+   "units": [
+    {
+     "title": "ABI snapshot",
+     "kind": "spec",
+     "start": 39,
+     "end": 60,
+     "anchor": "# SPDX-License-Identifier",
+     "summary": "Pins family ID 2, the info group with three 48-byte binary attrs, and the device-info fill.",
+     "details": "Attribute IDs 1-3 and the fixed length 48 are frozen here; removing or renumbering them would be an ABI break."
+    }
+   ]
+  },
+  {
+   "path": "Documentation/ctlv/abi/families.registry.yaml",
+   "purpose": "Append-only central registry whose order assigns family IDs.",
+   "units": [
+    {
+     "title": "Register ctlv-attestation-tdx",
+     "kind": "config",
+     "start": 69,
+     "end": 69,
+     "anchor": "ctlv-attestation-tdx",
+     "summary": "Appends the family third in the list, giving it ID 2."
+    }
+   ]
+  },
+  {
+   "path": "Documentation/ctlv/families.yaml",
+   "purpose": "List of families the generator tooling builds.",
+   "units": [
+    {
+     "title": "Add family to build list",
+     "kind": "config",
+     "start": 78,
+     "end": 78,
+     "anchor": "ctlv-attestation-tdx",
+     "summary": "Makes the tools process the new spec."
+    }
+   ]
+  },
+  {
+   "path": "Documentation/ctlv/generated-files.yaml",
+   "purpose": "Maps each family spec to the generated files that must stay in sync.",
+   "units": [
+    {
+     "title": "TDX family outputs",
+     "kind": "config",
+     "start": 87,
+     "end": 93,
+     "anchor": "",
+     "summary": "Declares spec source and the UAPI header, kernel header and kernel source output paths."
+    }
+   ]
+  },
+  {
+   "path": "Documentation/ctlv/specs/ctlv-attestation-tdx.yaml",
+   "purpose": "Source specification of the TDX family from which all generated files come.",
+   "units": [
+    {
+     "title": "Family and info group",
+     "kind": "spec",
+     "start": 100,
+     "end": 122,
+     "anchor": "# SPDX-License-Identifier",
+     "summary": "Declares a pre-init family inheriting ctlv-attestation with an `info` group of mrconfigid, mrowner and mrownerconfig.",
+     "details": "Each attribute is a binary of exactly 48 bytes (min-length equals max-length), matching the TDX report fields.  `pre-init: true` means a pre_init hook supplies the provider before init."
+    },
+    {
+     "title": "device-info fill",
+     "kind": "spec",
+     "start": 124,
+     "end": 129,
+     "anchor": "attr-sets:",
+     "summary": "Fills the base family's device-info extension point with the three info attributes."
+    }
+   ]
+  },
+  {
+   "path": "drivers/attestation/generated/ctlv_attestation_tdx_gen.c",
+   "purpose": "Generated kernel source: schema tables and the family descriptor. Every symbol it references that is not generated (op_pre/post, priv lifecycle, device_info_fill) is supplied by providers/tdx.c. Compiled with _CTLV_GENERATED_METADATA_ONLY so only metadata is emitted.",
+   "units": [
+    {
+     "title": "Header and includes",
+     "kind": "section",
+     "start": 136,
+     "end": 150,
+     "anchor": "// SPDX-License-Identifier",
+     "summary": "Generated-file banner and includes.",
+     "details": "Defining the metadata-only macro hides the accessor helpers that the kernel header otherwise emits."
+    },
+    {
+     "title": "Fill node schema",
+     "kind": "section",
+     "start": 152,
+     "end": 157,
+     "anchor": "static const struct ctlv_node_schema",
+     "summary": "Validation schema for the device-info fill: a root node and three 48-byte binary leaves."
+    },
+    {
+     "title": "Stub fill and family schema",
+     "kind": "section",
+     "start": 159,
+     "end": 171,
+     "anchor": "/* The extension points",
+     "summary": "Binds the fill schema to the parent's device-info set and defines the family schema with ID 2."
+    },
+    {
+     "title": "Uevent limits",
+     "kind": "section",
+     "start": 173,
+     "end": 175,
+     "anchor": "/* Maximum uevent cost",
+     "summary": "Compile-time checks that the chain's uevent cost fits the core limits."
+    },
+    {
+     "title": "Stub ops and family descriptor",
+     "kind": "section",
+     "start": 177,
+     "end": 196,
+     "anchor": "/* Extension-point callbacks",
+     "summary": "Wires the device_info fill callback and the lifecycle and op hooks into the exported `ctlv_attestation_tdx_family`.",
+     "details": "The parent is `ctlv_attestation_family`; ctlv_create() consumes this descriptor, as called from the provider in patch 20."
+    }
+   ]
+  },
+  {
+   "path": "drivers/attestation/generated/ctlv_attestation_tdx_gen.h",
+   "purpose": "Generated kernel header declaring the hooks the provider must implement, and typed accessors for the fill's attributes.",
+   "units": [
+    {
+     "title": "Header and includes",
+     "kind": "section",
+     "start": 203,
+     "end": 219,
+     "anchor": "/* SPDX-License-Identifier",
+     "summary": "Include guard, includes and the base family's generated header."
+    },
+    {
+     "title": "Provider hook declarations",
+     "kind": "section",
+     "start": 221,
+     "end": 238,
+     "anchor": "extern const struct ctlv_family_schema",
+     "summary": "Prototypes for op pre/post, priv lifecycle and the device-info fill, plus the exported family descriptor.",
+     "details": "These are the symbols implemented in drivers/attestation/providers/tdx.c."
+    },
+    {
+     "title": "Input accessors",
+     "kind": "section",
+     "start": 240,
+     "end": 257,
+     "anchor": "#ifndef _CTLV_GENERATED_METADATA_ONLY",
+     "summary": "Reference, has and binary getter helpers for the three fill attributes, hidden in metadata-only builds."
+    },
+    {
+     "title": "Reply put helpers",
+     "kind": "section",
+     "start": 259,
+     "end": 268,
+     "anchor": "/* Writing a reply.",
+     "summary": "Binary put helpers for the three attributes, used by device_info_fill; closes guards."
+    }
+   ]
+  },
+  {
+   "path": "include/uapi/linux/ctlv_attestation_tdx_gen.h",
+   "purpose": "Generated UAPI header giving userspace the group and attribute IDs of the family; includes the parent's header so one include covers the effective schema.",
+   "units": [
+    {
+     "title": "Header and includes",
+     "kind": "section",
+     "start": 275,
+     "end": 293,
+     "anchor": "/* SPDX-License-Identifier",
+     "summary": "Banner, explanatory comment, guard and includes of ctlv.h, the parent and the family registry."
+    },
+    {
+     "title": "Group enum",
+     "kind": "enum",
+     "start": 295,
+     "end": 298,
+     "anchor": "/* attr groups",
+     "summary": "Defines the `info` group with ID 1."
+    },
+    {
+     "title": "Info attribute IDs",
+     "kind": "macro",
+     "start": 300,
+     "end": 318,
+     "anchor": "#define _CTLV_ATTESTATION_TDX_ATTR(",
+     "summary": "Builds full attribute IDs from family, group and attr number: enum values 1-3 and public CTLV_ATTESTATION_TDX_ATTR_INFO_* macros."
+    }
+   ]
+  },
+  {
+   "path": "include/uapi/linux/ctlv_families_gen.h",
+   "purpose": "Generated enum of family IDs, in registry order.",
+   "units": [
+    {
+     "title": "Add CTLV_FAMILY_ATTESTATION_TDX",
+     "kind": "enum",
+     "start": 327,
+     "end": 327,
+     "anchor": "CTLV_FAMILY_ATTESTATION_TDX",
+     "summary": "Adds the new family enumerator with value 2."
+    }
+   ]
+  }
+ ]
+}

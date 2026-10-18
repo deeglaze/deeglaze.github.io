@@ -1,0 +1,181 @@
+{
+ "patch": 11,
+ "title": "ctlv: Prepare runtime introspection",
+ "overview": "Adds drivers/ctlv/introspection.c, the handlers behind the CTLV root family's discovery queries: list the family chain, list a device's published operations with effective sizes and state, and describe the request/reply message schema of an operation. It is a leaf of the core layering: it consumes the device, schema and cursor/serialization layers from earlier patches and is only wired to a device by the dispatch patch; the Makefile change just adds it to the ctlv object so it is compile-checked.",
+ "files": [
+  {
+   "path": "drivers/ctlv/Makefile",
+   "purpose": "Kbuild list of objects making up the ctlv module.",
+   "units": [
+    {
+     "title": "Add introspection.o to ctlv-y",
+     "kind": "build",
+     "start": 26,
+     "end": 31,
+     "anchor": "# SPDX-License-Identifier",
+     "summary": "Links the new introspection object into ctlv.o so it is compiled when CONFIG_CTLV is enabled.",
+     "details": "CONFIG_CTLV is not yet reachable from Kconfig in this patch, so this is a compile-check only."
+    }
+   ]
+  },
+  {
+   "path": "drivers/ctlv/introspection.c",
+   "purpose": "Implements the three query callbacks of the root family (families dump, ops dump, op schema get). Each runs under the generic query machinery, builds its reply with the generated root-family serializers, and may be fragmented: when the reply buffer fills it returns ctlv_op_query_more() with a cursor and is re-invoked with that cursor via ctlv_op_query_cursor(ctx).",
+   "units": [
+    {
+     "title": "Header, includes and cursor packing",
+     "kind": "section",
+     "start": 38,
+     "end": 77,
+     "anchor": "// SPDX-License-Identifier",
+     "summary": "Includes plus helpers that pack a (record, member) resume position into one u64 query cursor.",
+     "details": "The low 48 bits hold the record index, the high 16 bits the member within the record, so a fragment can stop in the middle of a record."
+    },
+    {
+     "title": "ctlv_introspection_family_record()",
+     "kind": "function",
+     "start": 79,
+     "end": 101,
+     "anchor": "/* The immutable root-first chain",
+     "summary": "Writes one family-chain entry (id, name) into a nested entry, resuming at pos->member.",
+     "details": "On a full buffer it returns false leaving pos->member at the first unwritten field; on success it resets member to 0."
+    },
+    {
+     "title": "ctlv_families_dump_query()",
+     "kind": "function",
+     "start": 103,
+     "end": 120,
+     "anchor": "int ctlv_families_dump_query(",
+     "summary": "Query callback that lists the families in the device's inheritance chain, root first.",
+     "details": "Uses ctlv_family_ancestor() to walk from the root to the leaf; the chain is immutable so the generation is always 0 and a cursor stays valid."
+    },
+    {
+     "title": "Op snapshot helpers",
+     "kind": "function",
+     "start": 122,
+     "end": 150,
+     "anchor": "/* Snapshot published-op state",
+     "summary": "Takes a consistent copy of the dynamic-disable bitmap and state generation, and tests an op against it.",
+     "details": "ctlv_introspection_snapshot_take() allocates the bitmap outside the lock and copies under transition_lock; ops with CTLV_OP_STATE_NONE are never disabled."
+    },
+    {
+     "title": "enum ctlv_introspection_op_field",
+     "kind": "enum",
+     "start": 152,
+     "end": 165,
+     "anchor": "/* Report effective lengths",
+     "summary": "Ordered list of members of one op record; the order is the resume order.",
+     "details": "Members double as pos->member values for fragmentation."
+    },
+    {
+     "title": "Op record field writers",
+     "kind": "function",
+     "start": 167,
+     "end": 217,
+     "anchor": "static bool ctlv_introspection_op_field_put(",
+     "summary": "Maps each member index to the matching generated serializer, and decides which members apply to which op type.",
+     "details": "Events carry only id, type and record length; actions add reply length; queries add reply min/suggested lengths. Sizes are the effective ones in op->sizes, including descendant fills."
+    },
+    {
+     "title": "ctlv_introspection_op_record()",
+     "kind": "function",
+     "start": 219,
+     "end": 235,
+     "anchor": "static bool ctlv_introspection_op_record(",
+     "summary": "Writes one op entry, skipping inapplicable members and resuming from pos->member.",
+     "details": "Returns false when the buffer is full, leaving the nest unfinished for the caller to abandon."
+    },
+    {
+     "title": "ctlv_ops_dump_query()",
+     "kind": "function",
+     "start": 237,
+     "end": 259,
+     "anchor": "int ctlv_ops_dump_query(",
+     "summary": "Query callback listing the device's published operations with availability and disabled state.",
+     "details": "- Snapshot is taken once per fragment and freed via __free(bitmap).\n- Walks ctlvdev->ops, which is frozen after init, so the record index is a stable cursor.\n- The snapshot generation is reported so a client can detect state changes between fragments."
+    },
+    {
+     "title": "Schema walk state",
+     "kind": "struct",
+     "start": 261,
+     "end": 296,
+     "anchor": "/* A leaf-count cursor",
+     "summary": "Structures for the schema description walk: a frame per nest level, the walk context, and a bounded list of leaf fields per node.",
+     "details": "The cursor for schema queries is a count of leaves already emitted (ordinal), which allows a fragment boundary at any depth. Frames are heap allocated because they must outlive each open nest."
+    },
+    {
+     "title": "Field list helpers",
+     "kind": "function",
+     "start": 298,
+     "end": 314,
+     "anchor": "static void ctlv_introspection_field(",
+     "summary": "Append a typed (attr, kind, value) leaf to a node's field list, bounded by CTLV_INTROSPECTION_MAX_FIELDS.",
+     "details": "ctlv_introspection_uint() is the common unsigned case."
+    },
+    {
+     "title": "ctlv_introspection_node_fields()",
+     "kind": "function",
+     "start": 316,
+     "end": 360,
+     "anchor": "/* Emit only constraints",
+     "summary": "Turns one schema node into the list of leaf attributes that describe it.",
+     "details": "Always attr id, kind and max occurrences; then kind-specific bounds (range, flags mask, lengths, blob limits), an optional unit and scale, and a re-entry level count if the node recurses."
+    },
+    {
+     "title": "Nest opening and leaf writing",
+     "kind": "function",
+     "start": 362,
+     "end": 402,
+     "anchor": "/* A nest is opened",
+     "summary": "Lazily open the nests down to a depth and write one leaf, skipping leaves already sent in earlier fragments.",
+     "details": "ctlv_introspection_open() opens parents first, so an empty node produces no nest. ctlv_introspection_put() increments walk->ordinal only for successfully written (or skipped) leaves, so a failed write is the resume point."
+    },
+    {
+     "title": "ctlv_introspection_reenters()",
+     "kind": "function",
+     "start": 404,
+     "end": 422,
+     "anchor": "/* Re-entry targets",
+     "summary": "Resolves a recursive node to how many levels up its matching ancestor sits.",
+     "details": "Matches an ancestor frame by tree and first_child; if none exists it sets walk->error to -EINVAL."
+    },
+    {
+     "title": "ctlv_introspection_children()",
+     "kind": "function",
+     "start": 424,
+     "end": 470,
+     "anchor": "static bool ctlv_introspection_node(",
+     "summary": "Emits a node's declared children, then the members contributed by filled stubs.",
+     "details": "Children are emitted as ATTRS (required) or OPTIONAL_ATTRS. For each stub schema on this node it looks up the fill via ctlv_schema_fill() for the device's family chain and recurses into the fill's members, forcing optionality when the stub placement is optional. Depth is bounded by CTLV_MAX_NEST_DEPTH."
+    },
+    {
+     "title": "ctlv_introspection_node()",
+     "kind": "function",
+     "start": 472,
+     "end": 499,
+     "anchor": "/* One node, into the nest",
+     "summary": "Describes one node: its fields, then its children, then closes its nest if it was opened.",
+     "details": "A re-entering node reports its back-edge instead of repeating children, which is how unbounded nesting is described finitely."
+    },
+    {
+     "title": "ctlv_introspection_message()",
+     "kind": "function",
+     "start": 501,
+     "end": 513,
+     "anchor": "/* One of the two messages",
+     "summary": "Describes the request or reply tree of an op as depth-0 frame.",
+     "details": "Does nothing if the op has no such message (node_schemas is NULL)."
+    },
+    {
+     "title": "ctlv_op_schema_get_query()",
+     "kind": "function",
+     "start": 515,
+     "end": 549,
+     "anchor": "int ctlv_op_schema_get_query(",
+     "summary": "Query callback that describes the request and reply schemas of one operation chosen by the request's op id.",
+     "details": "Finds the op with ctlv_op_find() (published ops only, regardless of dynamic state), allocates the frame array, and walks request then reply. Fragmentation returns ctlv_op_query_more() with the leaf ordinal; generation is always 0 because schemas are immutable."
+    }
+   ]
+  }
+ ]
+}

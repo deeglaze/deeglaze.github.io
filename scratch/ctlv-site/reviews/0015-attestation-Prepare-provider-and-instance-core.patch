@@ -1,0 +1,706 @@
+Hi Jiri,
+
+A few review comments on this patch inline below.
+
+> From 45657a388b9b316e126d5db222279171ff6ac093 Mon Sep 17 00:00:00 2001
+> From: Jiri Pirko <jiri@nvidia.com>
+> Date: Thu, 15 Oct 2026 16:50:48 +0200
+> Subject: [PATCH 15/20] attestation: Prepare provider and instance core
+>
+> Add provider validation, instance registration and lifecycle management for
+> the attestation family.
+>
+> The provider descriptor is one immutable evidence and MR contract; journal
+
+The commit message claims "The core object can be compile-checked here", but `drivers/Kconfig` and `drivers/Makefile` are not touched, so nothing builds this tree at this commit (neither allmodconfig nor any other config). `CONFIG_ATTESTATION remains unwired` means the series is not bisectable in any meaningful way: this patch and 0016 are never compiled until the "unwire" patch. Also, `core.c` refers to symbols (`ctlv_attestation_evidence_get_provide`/enable) that come from a generated header added earlier; please state that dependency. Consider merging 0015/0016/0017 or wiring Kconfig now.
+
+> storage follows in the next patch. The core object can be compile-checked
+> here. CONFIG_ATTESTATION remains unwired until the CTLV handlers land.
+>
+> Assisted-by: Cursor: GPT-5.6 Sol
+> Assisted-by: Cursor: Claude Opus 5.5
+> Signed-off-by: Jiri Pirko <jiri@nvidia.com>
+> ---
+>  Documentation/driver-api/attestation.rst |  36 +++
+>  Documentation/driver-api/index.rst       |   1 +
+>  MAINTAINERS                              |   2 +
+>  drivers/attestation/Kconfig              |  12 +
+>  drivers/attestation/Makefile             |   4 +
+>  drivers/attestation/core/core.c          | 280 +++++++++++++++++++++++
+>  drivers/attestation/core/internal.h      |  35 +++
+>  include/linux/attestation.h              | 138 +++++++++++
+>  8 files changed, 508 insertions(+)
+>  create mode 100644 Documentation/driver-api/attestation.rst
+>  create mode 100644 drivers/attestation/Kconfig
+>  create mode 100644 drivers/attestation/Makefile
+>  create mode 100644 drivers/attestation/core/core.c
+>  create mode 100644 drivers/attestation/core/internal.h
+>  create mode 100644 include/linux/attestation.h
+>
+> diff --git a/Documentation/driver-api/attestation.rst b/Documentation/driver-api/attestation.rst
+> new file mode 100644
+> index 000000000000..6d0cf9095c66
+> --- /dev/null
+> +++ b/Documentation/driver-api/attestation.rst
+> @@ -0,0 +1,36 @@
+> +.. SPDX-License-Identifier: GPL-2.0-only
+> +
+> +===========
+> +Attestation
+> +===========
+> +
+> +The attestation subsystem publishes provider devices as descendants of the
+> +``ctlv-attestation`` family.  It owns common evidence retrieval,
+> +measurement-register topology and an append-only extension journal.
+> +Providers retain ownership of native hardware access and immutable capability
+> +descriptions.
+> +
+> +Registering a provider
+
+Doc accuracy: "passes it to the base family through its generated `pre_init` callback" is confusing. The base family has no `pre_init`; `ctlv_attestation_init()` receives `init_info` as the descriptor, and `ctlv_attestation_tdx_pre_init()` is the provider family's hook that returns it. Also the doc names `ctlv_attestation_op_pre()/op_post()` but says nothing about which header exports them for providers (they are declared only in the generated `drivers/attestation/generated` header, which providers in-tree include privately).
+
+> +======================
+> +
+> +A provider defines ``struct attestation_provider`` and passes it to the base
+> +family through its generated ``pre_init`` callback.  The descriptor, evidence
+> +capabilities, fixed MR properties, strings and arrays remain immutable until
+> +``ctlv_destroy()`` or failed-creation unwind completes.
+> +
+> +The provider family creates the CTLV device with its own generated family
+> +descriptor.  Its family-wide operation hooks delegate once to
+> +``ctlv_attestation_op_pre()`` and ``ctlv_attestation_op_post()`` using the
+> +attestation parent priv.  The hooks serialize an operation, its native
+> +callback, journal commit and event emission with one instance mutex.
+> +
+> +Fixed MRs are listed in the provider descriptor.  Their property storage
+> +remains valid until ``ctlv_destroy()`` or failed-creation unwind completes.
+> +
+> +Teardown
+> +========
+> +
+> +CTLV first drains userspace operations.  The base ``pre_fini`` callback then
+> +withdraws the instance from the kernel registry while provider state and CTLV
+> +event emission remain available.  CTLV stops events only after that callback
+> +returns; provider and base ``fini`` callbacks may then release native storage.
+> diff --git a/Documentation/driver-api/index.rst b/Documentation/driver-api/index.rst
+> index e85a7a982bfc..ecf82a9330fc 100644
+> --- a/Documentation/driver-api/index.rst
+> +++ b/Documentation/driver-api/index.rst
+> @@ -38,6 +38,7 @@ of interest to most developers working on device drivers.
+>     early-userspace/index
+>     connector
+>     ctlv
+> +   attestation
+>     device-io
+>     devfreq
+>     dma-buf
+> diff --git a/MAINTAINERS b/MAINTAINERS
+> index 96fdd3e45a29..773ba70accbf 100644
+> --- a/MAINTAINERS
+> +++ b/MAINTAINERS
+> @@ -4337,7 +4337,9 @@ L:	linux-security-module@vger.kernel.org
+>  S:	Supported
+>  F:	Documentation/ctlv/abi/ctlv-attestation*
+>  F:	Documentation/ctlv/specs/ctlv-attestation*
+> +F:	Documentation/driver-api/attestation.rst
+>  F:	drivers/attestation/
+> +F:	include/linux/attestation*
+>  F:	include/uapi/linux/ctlv_attestation*
+>  
+>  ATTO EXPRESSSAS SAS/SATA RAID SCSI DRIVER
+> diff --git a/drivers/attestation/Kconfig b/drivers/attestation/Kconfig
+> new file mode 100644
+> index 000000000000..e2fb4b4205fe
+> --- /dev/null
+> +++ b/drivers/attestation/Kconfig
+> @@ -0,0 +1,12 @@
+> +# SPDX-License-Identifier: GPL-2.0-only
+> +menuconfig ATTESTATION
+> +	tristate "Attestation"
+> +	depends on CTLV
+> +	help
+> +	  Provides a CTLV family for evidence, measurement registers,
+> +	  and an append-only measurement journal.
+> +
+> +	  Providers register one instance for a physical or logical device and
+> +	  translate the common operations to their native service.
+> +
+> +	  If you are unsure, say N.
+> diff --git a/drivers/attestation/Makefile b/drivers/attestation/Makefile
+> new file mode 100644
+> index 000000000000..8a75558a7013
+> --- /dev/null
+> +++ b/drivers/attestation/Makefile
+> @@ -0,0 +1,4 @@
+> +# SPDX-License-Identifier: GPL-2.0
+> +obj-$(CONFIG_ATTESTATION) += attestation.o
+
+Makefile SPDX is "GPL-2.0" while every other new file in the patch uses "GPL-2.0-only"; pick one (the deprecated form is the odd one out). Also the module has an empty `module_init()`; see below. And this directory is not reachable from `drivers/Makefile` (see commit message comment).
+
+> +
+> +attestation-y := core/core.o
+> diff --git a/drivers/attestation/core/core.c b/drivers/attestation/core/core.c
+> new file mode 100644
+> index 000000000000..e112d3a0ff2b
+> --- /dev/null
+> +++ b/drivers/attestation/core/core.c
+> @@ -0,0 +1,280 @@
+> +// SPDX-License-Identifier: GPL-2.0-only
+> +#include <crypto/hash_info.h>
+> +#include <linux/cleanup.h>
+> +#include <linux/ctlv.h>
+> +#include <linux/device.h>
+> +#include <linux/err.h>
+> +#include <linux/limits.h>
+> +#include <linux/module.h>
+> +#include <linux/overflow.h>
+> +#include <linux/slab.h>
+> +#include <linux/string.h>
+> +
+> +#include "internal.h"
+> +
+> +static DEFINE_XARRAY(attestation_instances);
+
+Registry design: the xarray, plus `attestation_registry_lock`, plus `attestation_next_index`, plus an O(n) parent scan under `xa_lock`, is a lot of machinery for "one instance per parent device". Nothing in this patch (or later, as far as I can see) looks instances up by index; the xarray is used only as a sparse set carrying a mark. A plain `list_head` under the existing mutex (with a bool 'registered' under `att->lock`) would remove the `XA_MARK_1` trick, `xa_reserve` dance and monotonic index entirely. If a lookup-by-index UAPI is planned, it is not in this series, so this is speculative generality. Also the "one instance per parent" rule is not mentioned in the commit message or the docs.
+
+> +
+> +static DEFINE_MUTEX(attestation_registry_lock);
+> +static unsigned long attestation_next_index;
+> +
+> +static bool attestation_algorithm_valid(enum hash_algo algorithm)
+> +{
+> +	return algorithm >= 0 && algorithm < HASH_ALGO__LAST && hash_digest_size[algorithm] &&
+
+'algorithm >= 0': `enum hash_algo` is unsigned on most ABIs, so this is always true and trips `-Wtype-limits`/`-Wtautological-compare` under W=1 (and clang with `-Wtautological-unsigned-enum-zero-compare`). Drop it or cast. Also, because this is called with values read from a provider-owned array, the check could use one shared helper with `attestation_digest_set_copy()` in 0016, which open-codes a weaker variant (>= `HASH_ALGO__LAST`, !`hash_digest_size`) of the same test and omits the `HASH_MAX_DIGESTSIZE` bound.
+
+> +	       hash_digest_size[algorithm] <= HASH_MAX_DIGESTSIZE;
+> +}
+> +
+> +static int attestation_mr_props_validate(const struct attestation_provider *provider,
+> +					 const struct attestation_mr_props *props)
+> +{
+> +	size_t index;
+> +
+> +	if (!props || !props->name || !*props->name || strlen(props->name) > 128 ||
+> +	    !props->algorithms || !props->algorithms_count || props->algorithms_count > 21)
+
+Magic numbers 128, 21 (here), 16 and 4096 and 128 (below) are duplicated from the YAML spec (max-length: 128, max-occurrences: 21, etc.) with no #define and no link to the generated constants. If the spec changes the validator silently diverges. Define them once (ideally exported by the generator) or at least comment where they come from. 21 also looks arbitrary relative to the 23 entries in `hash_digest_size[]`; it is only meaningful as the spec's max-occurrences.
+
+> +		return -EINVAL;
+> +	for (index = 0; index < props->algorithms_count; index++) {
+> +		enum hash_algo algorithm = props->algorithms[index];
+> +
+> +		if (!attestation_algorithm_valid(algorithm) ||
+> +		    (index && props->algorithms[index - 1] >= algorithm))
+> +			return -EINVAL;
+> +	}
+> +	if (props->readable && !provider->mr_read)
+
+This function is also called again from `attestation_mr_alloc()` in 0016 on the very same props that `attestation_provider_validate()` already validated (the call chain `core_init` -> `provider_validate` -> per-MR validate, then `core_init` -> `mr_alloc` -> validate). The second pass is pure redundancy. Further, validation does not check that `props->id` values are unique, nor that a MR that is neither readable nor extendable is meaningful; uniqueness is only discovered later in `mr_alloc` (`xa_load`), after `provider_validate()` has already returned success, so `provider_validate()` as a named "validate" API is incomplete.
+
+> +		return -EINVAL;
+> +	if (props->extendable && !provider->mr_extend)
+> +		return -EINVAL;
+> +	return 0;
+> +}
+> +
+> +static int attestation_evidence_caps_validate(const struct attestation_provider *provider)
+> +{
+> +	const struct attestation_evidence_caps *caps = provider->evidence_caps;
+> +	size_t object_index;
+> +
+> +	if (!caps)
+> +		return provider->evidence_get ? -EINVAL : 0;
+> +	if (!provider->evidence_get || !caps->objects || !caps->objects_count ||
+> +	    caps->objects_count > 16 || caps->min_challenge_length > caps->max_challenge_length ||
+> +	    caps->max_challenge_length > 4096 || !caps->max_total_output_length)
+> +		return -EINVAL;
+> +	for (object_index = 0; object_index < caps->objects_count; object_index++) {
+> +		const struct attestation_evidence_supported_object *object =
+> +			&caps->objects[object_index];
+> +		size_t index;
+> +
+> +		if (!object->format || !*object->format || strlen(object->format) > 128 ||
+> +		    !object->max_length || object->max_length > UINT_MAX ||
+
+On 32-bit builds `size_t` == unsigned int so '`object->max_length` > `UINT_MAX`' is always false (compiler warning with some configs). If the intent is the spec's `u32` limit, say so; it is also not obvious why `max_length` must be <= `max_total_output_length` but there is no check that `max_total_output_length` itself is bounded (it can be `SIZE_MAX`), so any allocation later sized from it needs its own cap. Also `object->binds_mrs` is never validated against `provider->mrs_count` (`binds_mrs` without any MRs is incoherent).
+
+> +		    object->max_length > caps->max_total_output_length)
+> +			return -EINVAL;
+> +		for (index = 0; index < object_index; index++) {
+> +			const struct attestation_evidence_supported_object *prior =
+> +				&caps->objects[index];
+> +
+> +			if (!strcmp(prior->format, object->format))
+> +				return -EINVAL;
+> +		}
+> +	}
+> +	return 0;
+> +}
+> +
+> +int attestation_provider_validate(const struct attestation_provider *provider)
+
+Non-static, declared in `internal.h`, but only called from `core.c` in this patch. Make it static (or justify the export). Same applies to `attestation_provide_ops()` and (apart from patch 0016) `attestation_stop()`: the latter has no caller in this patch at all.
+
+> +{
+> +	size_t index;
+> +	int ret;
+> +
+> +	if (!provider)
+> +		return -EINVAL;
+> +	ret = attestation_evidence_caps_validate(provider);
+> +	if (ret)
+> +		return ret;
+> +	if (!!provider->mrs != !!provider->mrs_count)
+
+Missing: `provider->mr_read`/`mr_extend` are only tested for non-`NULL` when `mrs_count` != 0, but `evidence_get` has no check that the provider cannot register zero capabilities at all (no `evidence_caps` and no MRs gives a family device with zero operations). Is that intended?
+
+> +		return -EINVAL;
+> +	if ((provider->mr_read || provider->mr_extend) && !provider->mrs_count)
+> +		return -EINVAL;
+> +	for (index = 0; index < provider->mrs_count; index++) {
+> +		ret = attestation_mr_props_validate(provider, &provider->mrs[index]);
+> +		if (ret)
+> +			return ret;
+> +	}
+> +	return 0;
+> +}
+> +
+> +static bool attestation_parent_exists(struct device *parent)
+
+Linear scan of all instances under `xa_lock` for every registration, to enforce a "one instance per parent device" rule that is documented nowhere (commit message, Documentation, kernel-doc). If the rule is needed, say why; two ctlv devices under one parent is otherwise legal in CTLV.
+
+> +{
+> +	struct attestation *att;
+> +	unsigned long index;
+> +
+> +	xa_for_each(&attestation_instances, index, att)
+> +		if (ctlv_device_parent(att->ctlvdev) == parent)
+> +			return true;
+> +	return false;
+> +}
+> +
+> +static int attestation_registry_insert(struct attestation *att)
+> +{
+> +	unsigned long index;
+> +	void *old;
+> +	int ret;
+> +
+> +	guard(mutex)
+> +		(&attestation_registry_lock);
+> +	if (attestation_next_index > UINT_MAX)
+
+On 32-bit unsigned long == unsigned int, so this is always false and `attestation_next_index` silently wraps to 0, colliding with live indices (`xa_reserve()` on an occupied slot succeeds and `__xa_store()` would then overwrite the live instance). Use '`attestation_next_index` == `UINT_MAX`' compared on an unsigned int, or `xa_alloc_cyclic()`/`xa_alloc()`. Hand-rolled monotonic index plus `xa_reserve` plus `__xa_store` is exactly what `xa_alloc()` does under its own lock. Also the index never gets reused, so a provider that is repeatedly bound/unbound eventually exhausts the 32-bit space (`-ENOSPC` forever); `xa_alloc_cyclic` would avoid that.
+
+> +		return -ENOSPC;
+> +	index = attestation_next_index;
+> +	ret = xa_reserve(&attestation_instances, index, GFP_KERNEL);
+> +	if (ret)
+> +		return ret;
+> +
+> +	xa_lock(&attestation_instances);
+> +	if (attestation_parent_exists(ctlv_device_parent(att->ctlvdev))) {
+> +		__xa_erase(&attestation_instances, index);
+> +		ret = -EEXIST;
+> +		goto out_unlock;
+> +	}
+> +	old = __xa_store(&attestation_instances, index, att, GFP_NOWAIT);
+
+Storing into a reserved slot cannot fail with `GFP_NOWAIT` (no allocation needed), so 'ret = `xa_err(old)`' and the 'if (!ret)' branch are dead error handling. Either use a comment + `WARN_ON`, or restructure with `xa_alloc()`. Also the unwinding with `__xa_erase()` of a just-reserved slot is correct but easy to get wrong; note `xa_release()` is the idiomatic call for a reservation that is not used.
+
+> +	ret = xa_err(old);
+> +	if (!ret) {
+> +		att->index = index;
+> +		attestation_next_index++;
+> +	}
+> +out_unlock:
+> +	xa_unlock(&attestation_instances);
+> +	return ret;
+> +}
+> +
+> +static void attestation_registry_remove(struct attestation *att)
+
+`xa_erase()` without `attestation_registry_lock` is fine, but then the monotonic counter protected by that lock is not decremented, see above. Trivial wrapper used once; inline it.
+
+> +{
+> +	xa_erase(&attestation_instances, att->index);
+> +}
+> +
+> +bool attestation_registered(struct attestation *att)
+
+`xa_get_mark()` already takes `rcu_read_lock()` internally; the surrounding `xa_lock()`/`xa_unlock()` is redundant (and makes the function look as if it needs the lock). Also the registered state is conceptually per-instance, but is stored in a global shared structure and requires a global spinlock round-trip for every operation (called by `ctlv_attestation_op_pre()` for every request). A simple 'bool registered' field protected by `att->lock` (which every reader already holds, see `lockdep_assert_held`) would be both simpler and cheaper. Note that `ctlv_attestation_pre_fini()` flips the mark without `att->lock` while `op_pre()` reads it with `att->lock`; this relies solely on CTLV having drained operations, which the doc states, but then the mark is not needed for `op_pre()` at all.
+
+> +{
+> +	bool registered;
+> +
+> +	lockdep_assert_held(&att->lock);
+> +	xa_lock(&attestation_instances);
+> +	registered = xa_get_mark(&attestation_instances, att->index, ATTESTATION_REGISTERED);
+> +	xa_unlock(&attestation_instances);
+> +	return registered;
+> +}
+> +
+> +void attestation_stop(struct attestation *att)
+
+No caller in this patch (added for 0016's overflow handling, so the unused-until-later pattern). Also it duplicates the body of `ctlv_attestation_pre_fini()` verbatim; make `pre_fini` call it (it can't since `pre_fini` does not hold `att->lock`, which makes the `lockdep_assert_held` here a reason for duplicated code). Please factor a `__`-prefixed helper that does the xa work.
+
+> +{
+> +	lockdep_assert_held(&att->lock);
+> +	xa_lock(&attestation_instances);
+> +	__xa_clear_mark(&attestation_instances, att->index, ATTESTATION_REGISTERED);
+> +	xa_unlock(&attestation_instances);
+> +}
+> +
+> +void attestation_provide_ops(struct attestation *att)
+
+Only `evidence_get` is handled here; consider where the 'unprovided' ops are rejected. Not an issue by itself, but note this function is exported via `internal.h` without an external caller (static candidate).
+
+> +{
+> +	const struct attestation_provider *provider = att->provider;
+> +	struct ctlv_device *ctlvdev = att->ctlvdev;
+> +
+> +	if (provider->evidence_caps) {
+> +		ctlv_attestation_evidence_get_provide(ctlvdev);
+> +		ctlv_attestation_evidence_get_enable(ctlvdev);
+> +	}
+> +}
+> +
+> +int attestation_core_init(struct attestation *att, struct ctlv_device *ctlvdev,
+
+`attestation_core_init()`/`fini()` are non-static and declared here, but the only users are the wrappers `ctlv_attestation_init()`/`fini()` in `core.c`. Two layers of indirection (`ctlv_attestation_init` -> `attestation_core_init`) with no second user: inline them.
+
+> +			  const struct attestation_provider *provider)
+> +{
+> +	int ret;
+> +
+> +	ret = attestation_provider_validate(provider);
+> +	if (ret)
+> +		return ret;
+> +	mutex_init(&att->lock);
+
+Error path analysis: `attestation_provider_validate()` failure returns before att is touched, OK. But on any later failure `attestation_core_fini()` is used as the unwind, and it keys on `att->ctlvdev` being non-`NULL` and a separate `att->initialized` flag to know whether registry insertion happened. These two state flags exist only because the unwind function doubles as the regular fini function. Cleaner: dedicated goto labels, no 'initialized' field. Also att is allocated by CTLV (`priv_size`) so it is zeroed; fine, but `mutex_init()` is done before validation-independent state, OK.
+
+> +	att->ctlvdev = ctlvdev;
+> +	att->provider = provider;
+> +	ret = attestation_registry_insert(att);
+> +	if (ret)
+> +		goto err_core;
+> +	attestation_provide_ops(att);
+
+`attestation_provide_ops()` runs inside `init()` before `post_init()` marks the instance registered and before the ctlv device is visible; fine. But '`att->initialized` = true' is set after `provide_ops`, while registry insertion happened earlier; between insertion and 'initialized = true' there is no failure path, so 'initialized' is equivalent to 'ret == 0 from insert' and the field is just dead state that mirrors `att->index is in the xarray`. Remove it and use label-based unwind.
+
+> +	att->initialized = true;
+> +	return 0;
+> +
+> +err_core:
+
+Label name is misleading (it only unwinds `mutex_destroy` and ctlvdev); also the use of the full fini function for partially-initialized objects is fragile once 0016 adds more resources.
+
+> +	attestation_core_fini(att);
+> +	return ret;
+> +}
+> +
+> +void attestation_core_fini(struct attestation *att)
+> +{
+> +	if (!att->ctlvdev)
+> +		return;
+> +	if (att->initialized)
+> +		attestation_registry_remove(att);
+> +	mutex_destroy(&att->lock);
+> +	att->ctlvdev = NULL;
+> +}
+> +
+> +size_t ctlv_attestation_priv_size(void)
+> +{
+> +	return sizeof(struct attestation);
+> +}
+> +
+> +int ctlv_attestation_init(struct ctlv_device *ctlvdev, const void *init_info, void *priv)
+> +{
+> +	return attestation_core_init(priv, ctlvdev, init_info);
+> +}
+> +
+> +int ctlv_attestation_post_init(struct ctlv_device *ctlvdev, void *priv)
+
+Unused parameter 'ctlvdev' (dictated by the generated prototype, fine), but this function always returns 0 here and 0016 is the first patch that makes it fallible; the 'return 0' with an unconditional mark set could be done by registry insert time if the log were not allocated post-init. See 0016 comment on why the journal is allocated here rather than in `init()`.
+
+> +{
+> +	struct attestation *att = priv;
+> +
+> +	xa_lock(&attestation_instances);
+> +	__xa_set_mark(&attestation_instances, att->index, ATTESTATION_REGISTERED);
+> +	xa_unlock(&attestation_instances);
+> +	return 0;
+> +}
+> +
+> +void ctlv_attestation_pre_fini(struct ctlv_device *ctlvdev, void *priv)
+> +{
+> +	struct attestation *att = priv;
+> +
+> +	xa_lock(&attestation_instances);
+> +	__xa_clear_mark(&attestation_instances, att->index, ATTESTATION_REGISTERED);
+> +	xa_unlock(&attestation_instances);
+> +}
+> +
+> +void ctlv_attestation_fini(struct ctlv_device *ctlvdev, void *priv)
+> +{
+> +	attestation_core_fini(priv);
+> +}
+> +
+> +int ctlv_attestation_op_pre(void *priv, struct ctlv_op_ctx *ctx)
+> +{
+> +	struct attestation *att = priv;
+> +
+> +	mutex_lock(&att->lock);
+> +	if (!attestation_registered(att)) {
+> +		mutex_unlock(&att->lock);
+> +		return -ENODEV;
+> +	}
+> +	return 0;
+> +}
+> +
+> +void ctlv_attestation_op_post(void *priv, struct ctlv_op_ctx *ctx)
+> +{
+> +	struct attestation *att = priv;
+> +
+> +	mutex_unlock(&att->lock);
+> +}
+> +
+> +static int __init attestation_module_init(void)
+
+Empty `module_init()`. Modules without init work do not need one (`module_init`/exit can be omitted if there is nothing to do; the `WARN_ON_ONCE` in exit is the only content, and it asserts a condition that cannot hold if providers are modules that depend on this one via symbol references, since this module cannot be unloaded while they hold references). Consider dropping both, or document the invariant.
+
+> +{
+> +	return 0;
+> +}
+> +
+> +static void __exit attestation_module_exit(void)
+> +{
+> +	WARN_ON_ONCE(!xa_empty(&attestation_instances));
+> +	xa_destroy(&attestation_instances);
+> +}
+> +
+> +module_init(attestation_module_init);
+> +module_exit(attestation_module_exit);
+> +MODULE_DESCRIPTION("Attestation core");
+> +MODULE_LICENSE("GPL");
+> +MODULE_IMPORT_NS("CTLV");
+
+Missing includes: `<linux/xarray.h>`, `<linux/mutex.h>` come only transitively via `internal.h`; `core.c` uses `UINT_MAX` (`limits.h` included), strcmp/strlen (`string.h` ok), mutex (via `internal.h`). Also nothing in `core.c` uses `<linux/overflow.h>`, `<linux/cleanup.h>` is used for `guard()`. `<linux/overflow.h>` and `<linux/device.h>` look unused: remove.
+
+> diff --git a/drivers/attestation/core/internal.h b/drivers/attestation/core/internal.h
+> new file mode 100644
+> index 000000000000..767c02275d0f
+> --- /dev/null
+> +++ b/drivers/attestation/core/internal.h
+> @@ -0,0 +1,35 @@
+> +/* SPDX-License-Identifier: GPL-2.0-only */
+> +#ifndef _ATTESTATION_INTERNAL_H
+> +#define _ATTESTATION_INTERNAL_H
+> +
+> +#include <linux/attestation.h>
+> +#include <linux/ctlv.h>
+> +#include <linux/mutex.h>
+> +#include <linux/xarray.h>
+> +
+> +#include "../generated/ctlv_attestation_gen.h"
+> +
+> +#define ATTESTATION_REGISTERED XA_MARK_1
+
+Why `XA_MARK_1` and not `XA_MARK_0`? Undocumented. (`XA_MARK_0` is conventionally the first; picking `MARK_1` with no explanation looks like a leftover.)
+
+> +
+> +struct attestation {
+> +	struct ctlv_device *ctlvdev;
+> +	const struct attestation_provider *provider;
+> +	unsigned int index;
+
+'index' field is only used for the xarray key; with the simplification suggested above it disappears. Also the struct has no kernel-doc and the comment "Mutable instance state." above 'lock' is vague: state which fields the lock protects (log/mrs in 0016 are also protected by it, but 'initialized' and 'index' are not).
+
+> +
+> +	/* Mutable instance state. */
+> +	struct mutex lock;
+> +
+> +	bool initialized;
+> +};
+> +
+> +int attestation_core_init(struct attestation *att,
+> +			  struct ctlv_device *ctlvdev,
+> +			  const struct attestation_provider *provider);
+> +void attestation_core_fini(struct attestation *att);
+> +bool attestation_registered(struct attestation *att);
+> +void attestation_stop(struct attestation *att);
+> +
+> +int attestation_provider_validate(const struct attestation_provider *provider);
+> +void attestation_provide_ops(struct attestation *att);
+> +
+> +#endif /* _ATTESTATION_INTERNAL_H */
+> diff --git a/include/linux/attestation.h b/include/linux/attestation.h
+> new file mode 100644
+> index 000000000000..0fd806ea77d8
+> --- /dev/null
+> +++ b/include/linux/attestation.h
+> @@ -0,0 +1,138 @@
+> +/* SPDX-License-Identifier: GPL-2.0-only */
+> +#ifndef _LINUX_ATTESTATION_H
+> +#define _LINUX_ATTESTATION_H
+> +
+> +#include <crypto/hash.h>
+> +#include <linux/types.h>
+> +
+> +#include <uapi/linux/ctlv_attestation_gen.h>
+> +#include <uapi/linux/hash_info.h>
+> +
+> +struct attestation;
+> +struct ctlv_blob;
+> +
+> +/**
+> + * struct attestation_digest - One MR digest.
+
+The structure embeds `u8 data[HASH_MAX_DIGESTSIZE]` (64 bytes), but the actual length is `hash_digest_size[algorithm]`; nothing documents that the unused tail must be ignored (and in 0016 it is copied wholesale and could contain provider stack bytes). Document it or zero it. Also `<crypto/hash.h>` is a heavy include only needed for `HASH_MAX_DIGESTSIZE`; `<crypto/hash_info.h>` would do. And this header includes `<uapi/linux/hash_info.h>` after `crypto/hash.h`; order is not alphabetical.
+
+> + * @algorithm: hash algorithm
+> + * @data: digest bytes
+> + */
+> +struct attestation_digest {
+> +	enum hash_algo algorithm;
+> +	u8 data[HASH_MAX_DIGESTSIZE];
+> +};
+> +
+> +/**
+> + * struct attestation_digest_set - Digests ordered as the MR algorithms.
+> + * @values_count: number of digests
+> + * @values: digest array
+> + */
+> +struct attestation_digest_set {
+> +	size_t values_count;
+> +	struct attestation_digest *values;
+> +};
+> +
+> +/**
+> + * struct attestation_mr_props - Immutable MR properties.
+> + * @id: provider-unique MR ID
+> + * @name: MR name
+> + * @algorithms: ordered hash algorithms
+> + * @algorithms_count: number of algorithms
+> + * @has_register_index: whether @register_index is valid
+> + * @register_index: native register index
+> + * @readable: MR can be read
+> + * @extendable: MR can be extended
+> + */
+> +struct attestation_mr_props {
+> +	unsigned int id;
+> +	const char *name;
+> +	const enum hash_algo *algorithms;
+> +	size_t algorithms_count;
+> +	bool has_register_index;
+> +	unsigned int register_index;
+> +	bool readable;
+> +	bool extendable;
+> +};
+> +
+> +/**
+> + * struct attestation_evidence_supported_object - Evidence output description.
+> + * @format: evidence format name
+> + * @max_length: maximum output bytes
+> + * @binds_mrs: evidence validity depends on MR state
+> + */
+> +struct attestation_evidence_supported_object {
+> +	const char *format;
+> +	size_t max_length;
+> +	bool binds_mrs;
+> +};
+> +
+> +/**
+> + * struct attestation_evidence_caps - Immutable evidence capabilities.
+> + * @min_challenge_length: minimum challenge bytes
+> + * @max_challenge_length: maximum challenge bytes
+> + * @max_total_output_length: maximum bytes across all objects
+> + * @objects: supported evidence objects
+> + * @objects_count: number of objects
+> + */
+> +struct attestation_evidence_caps {
+> +	size_t min_challenge_length;
+> +	size_t max_challenge_length;
+> +	size_t max_total_output_length;
+> +	const struct attestation_evidence_supported_object *objects;
+> +	size_t objects_count;
+> +};
+> +
+> +/**
+> + * struct attestation_evidence_object_request - One resolved output object.
+
+`struct attestation_evidence_object_request`, `_request`, `_result` and the `evidence_get()` callback are public API with no user in this patch (first user is the CTLV handler in 0017 and TDX in the last patches). Fine for an API header, but then the `evidence_get` prototype taking 'struct attestation *att' gives providers no way to get their private data: there is no accessor (e.g. `attestation_priv(att)`) or `container_of` embedding documented. Check that providers (`providers/tdx.c`) can actually find their state; if they rely on `container_of` from a struct wrapping struct attestation it conflicts with ctlv's priv allocation (the attestation is the 'parent priv').
+
+> + * @supported_object: matching capability entry
+> + * @output: resolved output blob
+> + */
+> +struct attestation_evidence_object_request {
+> +	const struct attestation_evidence_supported_object *supported_object;
+> +	struct ctlv_blob *output;
+> +};
+> +
+> +/**
+> + * struct attestation_evidence_request - Validated evidence request.
+> + * @challenge: challenge bytes
+> + * @challenge_length: challenge length
+> + * @objects: requested output objects
+> + * @objects_count: number of objects
+> + */
+> +struct attestation_evidence_request {
+> +	const u8 *challenge;
+> +	size_t challenge_length;
+> +	const struct attestation_evidence_object_request *objects;
+> +	size_t objects_count;
+> +};
+> +
+> +/**
+> + * struct attestation_evidence_result - Provider evidence result.
+> + * @object_lengths: produced length for every requested object
+
+Ownership/size of `object_lengths` is undocumented (who allocates, how many entries: `objects_count`?). kernel-doc for the return values of the callbacks and for locking context (called with `att->lock` held, may sleep) is missing from `struct attestation_provider`.
+
+> + */
+> +struct attestation_evidence_result {
+> +	size_t *object_lengths;
+> +};
+> +
+> +/**
+> + * struct attestation_provider - Immutable provider operations and properties.
+> + * @evidence_get: produce requested evidence
+> + * @mr_read: read one MR
+> + * @mr_extend: extend one MR
+> + * @evidence_caps: evidence capabilities, or NULL
+
+kernel-doc for the three callbacks is missing (`@evidence_get`, `@mr_read`, `@mr_extend` are listed, but the semantics - locking, whether they may sleep, errors, what 'values' contains on input to `mr_read`) are not described. Public API should say.
+
+> + * @mrs: fixed MR properties
+> + * @mrs_count: number of fixed MRs
+> + */
+> +struct attestation_provider {
+> +	int (*evidence_get)(struct attestation *att,
+> +			    const struct attestation_evidence_request *request,
+> +			    struct attestation_evidence_result *result);
+> +	int (*mr_read)(struct attestation *att, unsigned int mr_id,
+> +		       struct attestation_digest_set *values);
+> +	int (*mr_extend)(struct attestation *att, unsigned int mr_id,
+> +			 const struct attestation_digest_set *values);
+> +	const struct attestation_evidence_caps *evidence_caps;
+> +	const struct attestation_mr_props *mrs;
+> +	size_t mrs_count;
+> +};
+> +
+> +#endif /* _LINUX_ATTESTATION_H */
+> -- 
+> 2.55.0
+>
+
+-- 
+Summary:
+Most serious issues:
+- Series is not buildable/bisectable in practice: `drivers/Kconfig` and `drivers/Makefile` are not wired, so the "compile-checked" claim in the changelog is not true for any config until a later patch.
+- `attestation_registry_insert()`: '`attestation_next_index` > `UINT_MAX`' is always false on 32-bit and the hand-rolled index can wrap and `__xa_store()` over a live instance; `xa_alloc_cyclic()`/a list would be simpler and correct. Dead error handling after `__xa_store()` into a reserved slot.
+- `attestation_registered()` takes `xa_lock` redundantly; per-instance state kept in a global xarray mark rather than a field under `att->lock`.
+- Validation: tautological 'algorithm >= 0', '`max_length` > `UINT_MAX`' on 32-bit, magic numbers duplicated from the spec, redundant revalidation in 0016, incomplete (no unique-id check) `provider_validate()`.
+- Non-static helpers with no external user (`provider_validate`, `provide_ops`, `core_init`/fini, `attestation_stop` unused here), unneeded 'initialized' flag, empty `module_init`, and missing kernel-doc for the provider callbacks (locking/context/ownership).
+- Docs: `pre_init` description inaccurate.

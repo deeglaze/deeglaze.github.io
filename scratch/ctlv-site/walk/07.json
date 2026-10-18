@@ -1,0 +1,250 @@
+{
+ "patch": 7,
+ "title": "ctlv: Prepare schema validation",
+ "overview": "Adds schema.c, the layer that interprets the generated schema tables: walking the family chain, computing effective message size limits, and validating inbound messages against the schema while building a per-request index. It sits above message.c and blob_desc.c (cursor/blob checks) and below the dispatch code added in patch 12. The Makefile hooks it into ctlv-y, but CONFIG_CTLV stays unwired until dispatch completes the module.",
+ "files": [
+  {
+   "path": "drivers/ctlv/Makefile",
+   "purpose": "Kbuild rules for the ctlv module object list.",
+   "units": [
+    {
+     "title": "Add schema.o to ctlv-y",
+     "kind": "build",
+     "start": 26,
+     "end": 31,
+     "anchor": "@@ -1,4 +1,4 @@",
+     "summary": "Links the new schema.o into the ctlv module alongside blob_desc.o and message.o.",
+     "details": "Only reachable once CONFIG_CTLV is wired up in a later patch."
+    }
+   ]
+  },
+  {
+   "path": "drivers/ctlv/schema.c",
+   "purpose": "Interprets the generated per-family schema tables. Provides chain walking (parent families own their own metadata, effective schema = chain), stub-fill lookup, computation of per-op size limits, and full validation of requests and replies against the schema. Called by dispatch (patch 12) and the event queue (patch 10); calls message.c iterators and blob_desc.c.",
+   "units": [
+    {
+     "title": "Header, includes and constants",
+     "kind": "section",
+     "start": 38,
+     "end": 71,
+     "anchor": "SPDX-License-Identifier: GPL-2.0-only",
+     "summary": "License, includes, and two length constants used by the size computation.",
+     "details": "`CTLV_SCHEMA_SCALAR_ATTR_LEN` is the size of an attr header plus a u64; `CTLV_SCHEMA_MAX_COMPOSED_LEN` caps composed totals at the event queue limit."
+    },
+    {
+     "title": "Family chain walking and op cursor",
+     "kind": "function",
+     "start": 73,
+     "end": 116,
+     "anchor": "const struct ctlv_family *ctlv_family_ancestor(",
+     "summary": "Helpers to navigate the parent chain of families and iterate every op of the effective schema, root-most family first.",
+     "details": "- `ctlv_family_ancestor()` goes up N parents.\n- `ctlv_family_levels()` counts chain length including the family.\n- `ctlv_schema_cursor_init()`/`ctlv_schema_next_op()` walk from the root ancestor down to the target, yielding each op and its owning family; used by dispatch in patch 12."
+    },
+    {
+     "title": "ctlv_schema_member()",
+     "kind": "function",
+     "start": 118,
+     "end": 152,
+     "anchor": "bool ctlv_schema_member(",
+     "summary": "Looks up the schema position of a child attr ID under a node, including members contributed by filled stubs.",
+     "details": "Searches direct children first, then any stub at that node whose fill schema is found for this family chain, recursing into the fill's root. Returns the owning tree and node index in `struct ctlv_schema_pos`."
+    },
+    {
+     "title": "ctlv_schema_fill()",
+     "kind": "function",
+     "start": 154,
+     "end": 169,
+     "anchor": "const struct ctlv_stub_fill_schema *ctlv_schema_fill(",
+     "summary": "Finds the stub fill schema for a (family_id, set_id) pair in the family or any ancestor.",
+     "details": "Returns NULL if no family in the chain fills that stub, which callers treat as 'stub unfilled'."
+    },
+    {
+     "title": "Length walk: payload, attr and children maxima",
+     "kind": "function",
+     "start": 171,
+     "end": 276,
+     "anchor": "/*",
+     "summary": "Recomputes the maximum encoded length of a schema tree, including contributions from filled stubs, with overflow and depth guards.",
+     "details": "- `struct ctlv_schema_length_walk` carries the family and a sticky `bad` flag.\n- Per-kind payload sizes: 8 bytes for integers, 1 for bool, max_len+1 for strings, a fixed multiple of scalar attrs for blobs.\n- `children_max_len` multiplies each child by `max_occurrences`, and marks the walk bad for unlimited or re-entering placements, depth overflow, or totals above the composed-length cap."
+    },
+    {
+     "title": "Minimum and root length helpers",
+     "kind": "function",
+     "start": 278,
+     "end": 358,
+     "anchor": "/* Buffer length that the largest indivisible leaf",
+     "summary": "Computes the smallest buffer a query reply fragment needs and related root-level lengths.",
+     "details": "- `ctlv_schema_min_len()` finds the largest indivisible leaf plus the nest headers above it.\n- `ctlv_schema_root_max_len()` is root header plus children max.\n- `ctlv_schema_reentering_min_len()` handles trees that re-enter, sizing one deepest leaf under `CTLV_MAX_NEST_DEPTH` nests.\n- `ctlv_schema_tree_reenters()` detects such trees."
+    },
+    {
+     "title": "ctlv_schema_op_sizes()",
+     "kind": "function",
+     "start": 360,
+     "end": 411,
+     "anchor": "int ctlv_schema_op_sizes(",
+     "summary": "Derives the effective size limits of one op (request max, action reply max, query min/suggested, event record max) and rejects ops that exceed the inline or queue limits.",
+     "details": "Called from op registration in patch 12 (`entry->sizes`). Query suggested length is the larger of the spec's value and the computed minimum, since filled stubs can lengthen one fragment. Returns -EINVAL for an unknown op type or any bad/oversized result."
+    },
+    {
+     "title": "Validation state and message_index_free()",
+     "kind": "function",
+     "start": 413,
+     "end": 435,
+     "anchor": "/*",
+     "summary": "Defines the validation context and releases a request's input index.",
+     "details": "`struct ctlv_schema_validation` holds the message and the error slot recording the first failure. `ctlv_message_index_free()` frees slots, scopes, nests and the index itself; declared in message.h (patch 5), called by dispatch teardown and on validation failure."
+    },
+    {
+     "title": "Index growth and slot allocation",
+     "kind": "function",
+     "start": 437,
+     "end": 482,
+     "anchor": "static void *ctlv_schema_index_grow(",
+     "summary": "Grows the index arrays geometrically and appends initialised slots.",
+     "details": "`ctlv_schema_index_grow()` doubles capacity from at least 16 with overflow checks and uses `kvrealloc` with accounted GFP. `ctlv_schema_index_slots_add()` appends `count` slots with offsets set to the NONE sentinel."
+    },
+    {
+     "title": "Index scopes and nests",
+     "kind": "function",
+     "start": 484,
+     "end": 563,
+     "anchor": "static int ctlv_schema_index_scope_add(",
+     "summary": "Builds the index entry for a received nest: one scope per schema tree contributing members, recursing into filled stubs.",
+     "details": "- A scope covers one tree node's children and owns a contiguous run of slots.\n- Scopes under an optional stub (or any ancestor optional stub) are flagged optional so their required members are not enforced.\n- `ctlv_schema_index_nest_add()` records the nest's wire offset and creates its scopes."
+    },
+    {
+     "title": "Error flags and error recording",
+     "kind": "function",
+     "start": 565,
+     "end": 591,
+     "anchor": "A request is never a fragment",
+     "summary": "Defines allowed attr flags for requests versus replies and the helpers that record the first validation failure.",
+     "details": "`ctlv_schema_bad()` fills `struct ctlv_error` with the reason, the offending attr offset (or nest offset if none), and the nest offset, returning -EINVAL. `ctlv_schema_bad_missing()` additionally records the missing attr ID."
+    },
+    {
+     "title": "Index slot lookup and record",
+     "kind": "function",
+     "start": 593,
+     "end": 652,
+     "anchor": "static struct ctlv_message_input_slot *ctlv_schema_index_slot(",
+     "summary": "Maps a schema position to its slot in a nest's index and records each occurrence of an attr.",
+     "details": "- `index_slot()` finds the scope whose tree and child range contain the position.\n- `index_record()` tracks count, first offset, end offset and the first excess occurrence beyond `max_occurrences`.\n- `index_nest_link()` chains child nest indexes per slot via first/last/next."
+    },
+    {
+     "title": "ctlv_schema_index_required()",
+     "kind": "function",
+     "start": 654,
+     "end": 687,
+     "anchor": "static int ctlv_schema_index_required(",
+     "summary": "After indexing a nest, checks required members are present and occurrence limits are respected, using the index.",
+     "details": "Required children are the first `required_children_count` children of each scope; missing ones are ignored in optional scopes. Excess occurrences report TOO_MANY_OCCURRENCES at the recorded excess offset."
+    },
+    {
+     "title": "Flag, scalar and range helpers",
+     "kind": "function",
+     "start": 689,
+     "end": 723,
+     "anchor": "The bits an attr of this message may carry",
+     "summary": "Per-direction allowed flags, scalar loading, and the exported value and length range predicates.",
+     "details": "`ctlv_schema_value_ok()` handles signed ranges, flag masks, bool, and unsigned/enum ranges; `ctlv_schema_length_ok()` checks min/max length. Both are reused by the output builders in patch 8."
+    },
+    {
+     "title": "Per-kind attr checks",
+     "kind": "function",
+     "start": 725,
+     "end": 779,
+     "anchor": "static int ctlv_schema_check_integer(",
+     "summary": "Validate the payload of integer-like, bool, string and binary attrs against the node's constraints.",
+     "details": "Integers must be exactly 8 bytes; strings must have exactly one trailing NUL and no embedded NULs, with length checked excluding it; binary is checked by length alone."
+    },
+    {
+     "title": "ctlv_schema_check_blob()",
+     "kind": "function",
+     "start": 781,
+     "end": 798,
+     "anchor": "/*",
+     "summary": "Validates a blob descriptor nest by delegating to the blob_desc layer.",
+     "details": "Uses `ctlv_blob_desc_read()` to parse the core-owned members and `ctlv_blob_desc_check()` to apply the node's allowed backings. Nothing is acquired here."
+    },
+    {
+     "title": "ctlv_schema_check_attr()",
+     "kind": "function",
+     "start": 800,
+     "end": 837,
+     "anchor": "static int ctlv_schema_check_nest(struct ctlv_schema_validation *v,",
+     "summary": "Dispatches checking of one known attr by schema kind after verifying flags and nested-ness agree with the schema.",
+     "details": "Forward declarations of the two nest checkers come first. Nests recurse into the indexed checker for requests and the plain checker for replies, with depth+1."
+    },
+    {
+     "title": "Occurrence counting and member checks",
+     "kind": "function",
+     "start": 839,
+     "end": 903,
+     "anchor": "How many times one member occurs",
+     "summary": "Non-indexed check of required members and occurrence limits for a nest, descending into filled stubs.",
+     "details": "`ctlv_schema_occurrences()` scans the nest counting an attr ID and remembering the first excess. `ctlv_schema_check_members()` enforces required members and max occurrences, and recurses into fill schemas, propagating the optional flag from optional stubs."
+    },
+    {
+     "title": "Unknown attr handling",
+     "kind": "function",
+     "start": 905,
+     "end": 955,
+     "anchor": "Whether one tree places one attr ID anywhere",
+     "summary": "Decides whether an attr not placed at this node may be skipped.",
+     "details": "`ctlv_schema_declares()` searches every op's request and reply trees in the effective schema (via the op cursor). An unknown attr is only ignorable if it carries IGNORE_IF_UNKNOWN and no tree anywhere declares its ID; otherwise it is rejected as UNKNOWN_ATTR."
+    },
+    {
+     "title": "ctlv_schema_check_indexed_nest()",
+     "kind": "function",
+     "start": 957,
+     "end": 1025,
+     "anchor": "static int ctlv_schema_check_indexed_nest(struct ctlv_schema_validation *v,",
+     "summary": "Validates a request nest in two passes while building its input index.",
+     "details": "- Pass 1 indexes each known member, detects non-contiguous repeats of an attr ID, then checks required/occurrence rules via the index.\n- Pass 2 revalidates in order: unknown attrs, the noncontiguous split, and per-attr checks; child nests are linked into their parent's slots.\n- Nest depth beyond `CTLV_MAX_NEST_DEPTH` is refused."
+    },
+    {
+     "title": "ctlv_schema_check_nest()",
+     "kind": "function",
+     "start": 1027,
+     "end": 1063,
+     "anchor": "/*",
+     "summary": "Validates a reply nest without building an index.",
+     "details": "Checks required members first and then every attr in wire order so the first reported error is the first thing to fix. A bad iteration step becomes MALFORMED_MESSAGE."
+    },
+    {
+     "title": "ctlv_schema_validate()",
+     "kind": "function",
+     "start": 1065,
+     "end": 1084,
+     "anchor": "int ctlv_schema_validate(",
+     "summary": "Entry point: validates a whole message against its tree, allocating the request index when the message is a request.",
+     "details": "Replies use `ctlv_schema_check_nest()`. Requests allocate `msg->index`, run the indexed checker on the root, and free the index on failure. Called by dispatch (request, patch 12) and by output paths that assert their own replies and events are valid (patches 10 and 12)."
+    }
+   ]
+  },
+  {
+   "path": "drivers/ctlv/schema.h",
+   "purpose": "Private header declaring the schema walkers and validation entry points that schema.c exports to the rest of the ctlv core.",
+   "units": [
+    {
+     "title": "Schema cursor and position types",
+     "kind": "struct",
+     "start": 1091,
+     "end": 1113,
+     "anchor": "/* SPDX-License-Identifier: GPL-2.0-only */",
+     "summary": "Header guard, includes, and the cursor and position structs.",
+     "details": "`struct ctlv_schema_cursor` iterates ops across the family chain; `struct ctlv_schema_pos` identifies a node in a particular tree."
+    },
+    {
+     "title": "Function declarations",
+     "kind": "function",
+     "start": 1115,
+     "end": 1140,
+     "anchor": "const struct ctlv_family *",
+     "summary": "Prototypes for chain walking, fill lookup, op sizes, member lookup, range predicates and validation.",
+     "details": "`struct ctlv_error` and `struct ctlv_msg` are forward declared for `ctlv_schema_validate()`."
+    }
+   ]
+  }
+ ]
+}

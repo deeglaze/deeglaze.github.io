@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Code walkthrough — CTLV family specifications</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="layout">
+<nav class="side">
+  <a class="brand" href="index.html">CTLV specs</a>
+  <div class="switch">
+    <a href="guide.html">Guide</a>
+    <a href="reference.html">Reference</a>
+    <a href="netlink.html">Netlink</a>
+    <a href="review.html">Reviews</a>
+    <a class="here" href="walkthrough.html">Walkthrough</a>
+  </div>
+  <ol class="patches">
+    <li><a href="walk-01.html" title="0001 ctlv: Add the schema language and generator">01 ctlv: Add the schema language and generator</a></li>
+    <li><a href="walk-02.html" title="0002 ctlv: Add the UAPI wire format and family API">02 ctlv: Add the UAPI wire format and family API</a></li>
+    <li><a href="walk-03.html" title="0003 ctlv: Add the root family specification and generated files">03 ctlv: Add the root family specification and generated files</a></li>
+    <li><a href="walk-04.html" title="0004 Documentation: ctlv: Add userspace ABI">04 Documentation: ctlv: Add userspace ABI</a></li>
+    <li><a href="walk-05.html" title="0005 ctlv: Prepare message input handling">05 ctlv: Prepare message input handling</a></li>
+    <li><a href="walk-06.html" title="0006 ctlv: Prepare blob descriptor validation">06 ctlv: Prepare blob descriptor validation</a></li>
+    <li><a href="walk-07.html" title="0007 ctlv: Prepare schema validation">07 ctlv: Prepare schema validation</a></li>
+    <li><a href="walk-08.html" title="0008 ctlv: Prepare message output handling">08 ctlv: Prepare message output handling</a></li>
+    <li><a href="walk-09.html" title="0009 ctlv: Prepare VA blob handling">09 ctlv: Prepare VA blob handling</a></li>
+    <li><a href="walk-10.html" title="0010 ctlv: Prepare event queue support">10 ctlv: Prepare event queue support</a></li>
+    <li><a href="walk-11.html" title="0011 ctlv: Prepare runtime introspection">11 ctlv: Prepare runtime introspection</a></li>
+    <li><a href="walk-12.html" title="0012 ctlv: Add device and operation dispatch">12 ctlv: Add device and operation dispatch</a></li>
+    <li><a href="walk-13.html" title="0013 Documentation: ctlv: Describe how to write a family">13 Documentation: ctlv: Describe how to write a family</a></li>
+    <li><a href="walk-14.html" title="0014 attestation: Add the base family specification and generated files">14 attestation: Add the base family specification and generated files</a></li>
+    <li><a href="walk-15.html" title="0015 attestation: Prepare provider and instance core">15 attestation: Prepare provider and instance core</a></li>
+    <li><a href="walk-16.html" title="0016 attestation: Prepare measurement register journal">16 attestation: Prepare measurement register journal</a></li>
+    <li><a href="walk-17.html" title="0017 attestation: Add CTLV operation handling">17 attestation: Add CTLV operation handling</a></li>
+    <li><a href="walk-18.html" title="0018 tdx-guest: Expose the native attestation service API">18 tdx-guest: Expose the native attestation service API</a></li>
+    <li><a href="walk-19.html" title="0019 attestation: Add the TDX family specification and generated files">19 attestation: Add the TDX family specification and generated files</a></li>
+    <li><a href="walk-20.html" title="0020 attestation: Add the TDX family implementation">20 attestation: Add the TDX family implementation</a></li>
+  </ol>
+</nav>
+<main>
+<h1>Code walkthrough</h1>
+<p class="lead">Each patch of the series laid out side by side: its code on the left, split into units (functions, structures, sections), and on the right what each unit means and how the pieces fit together.</p>
+<table>
+<tr><th>#</th><th>Patch</th><th>Structure</th><th>Files</th><th>Units</th></tr>
+<tr><td><a href="walk-01.html">01</a></td><td><a href="walk-01.html">ctlv: Add the schema language and generator</a></td><td class="wrap">Introduces the whole build-time half of CTLV: three JSON-Schema meta-schemas under Documentation/ctlv/ that define the YAML spec language, the append-only family registry and the generated-file manifest, plus the Python package tools/ctlv/ctlvgen that consumes them.</td><td>23</td><td>212</td></tr>
+<tr><td><a href="walk-02.html">02</a></td><td><a href="walk-02.html">ctlv: Add the UAPI wire format and family API</a></td><td class="wrap">Headers-only patch that fixes the contract of the series: the userspace TLV wire format, ioctl and event record (uapi/linux/ctlv.h), the cursor type shared by core and families (linux/ctlv.h), and the static schema/op/family descriptors that generated family code fills in (linux/ctlv_family.h).</td><td>5</td><td>23</td></tr>
+<tr><td><a href="walk-03.html">03</a></td><td><a href="walk-03.html">ctlv: Add the root family specification and generated files</a></td><td class="wrap">Defines the root CTLV family (ID 0) that every device answers: its YAML spec is the source of truth, with the registry, generated-file manifest and ABI snapshot around it.</td><td>9</td><td>43</td></tr>
+<tr><td><a href="walk-04.html">04</a></td><td><a href="walk-04.html">Documentation: ctlv: Add userspace ABI</a></td><td class="wrap">Documentation-only patch that publishes the CTLV userspace ABI as one RST document, links it into the userspace-api index and adds it to the CTLV MAINTAINERS entry.</td><td>3</td><td>20</td></tr>
+<tr><td><a href="walk-05.html">05</a></td><td><a href="walk-05.html">ctlv: Prepare message input handling</a></td><td class="wrap">Introduces the drivers/ctlv core module skeleton (Kconfig, Makefile, MAINTAINERS) and the input side of message handling: bounds-checked walking of TLV nests, a per-request index of attrs, and validated accessors.</td><td>7</td><td>34</td></tr>
+<tr><td><a href="walk-06.html">06</a></td><td><a href="walk-06.html">ctlv: Prepare blob descriptor validation</a></td><td class="wrap">Adds the helper that parses a blob descriptor (the nested type/address/fd/offset/length attribute group) out of a request and checks it against the blob limits of the schema node.</td><td>3</td><td>8</td></tr>
+<tr><td><a href="walk-07.html">07</a></td><td><a href="walk-07.html">ctlv: Prepare schema validation</a></td><td class="wrap">Adds schema.c, the layer that interprets the generated schema tables: walking the family chain, computing effective message size limits, and validating inbound messages against the schema while building a per-request index.</td><td>3</td><td>25</td></tr>
+<tr><td><a href="walk-08.html">08</a></td><td><a href="walk-08.html">ctlv: Prepare message output handling</a></td><td class="wrap">Adds the schema-aware reply builder: the put and nest helpers that family code uses to write output attributes, plus operation error reporting and query fragment completion.</td><td>5</td><td>19</td></tr>
+<tr><td><a href="walk-09.html">09</a></td><td><a href="walk-09.html">ctlv: Prepare VA blob handling</a></td><td class="wrap">Adds the blob layer: a family callback can resolve a validated blob descriptor in the request into a pinned, CPU-accessible user buffer, read or write it by offset, and release it.</td><td>6</td><td>26</td></tr>
+<tr><td><a href="walk-10.html">10</a></td><td><a href="walk-10.html">ctlv: Prepare event queue support</a></td><td class="wrap">Adds the event half of the core: per-open subscriptions, bounded per-file event queues with loss reporting, and event creation/emission for families.</td><td>7</td><td>33</td></tr>
+<tr><td><a href="walk-11.html">11</a></td><td><a href="walk-11.html">ctlv: Prepare runtime introspection</a></td><td class="wrap">Adds drivers/ctlv/introspection.c, the handlers behind the CTLV root family&#x27;s discovery queries: list the family chain, list a device&#x27;s published operations with effective sizes and state, and describe the request/reply message schema of an operation.</td><td>2</td><td>18</td></tr>
+<tr><td><a href="walk-12.html">12</a></td><td><a href="walk-12.html">ctlv: Add device and operation dispatch</a></td><td class="wrap">This patch adds drivers/ctlv/core.c, the layer that turns a family descriptor chain into a registered character device and dispatches validated ioctl operations to family callbacks.</td><td>7</td><td>62</td></tr>
+<tr><td><a href="walk-13.html">13</a></td><td><a href="walk-13.html">Documentation: ctlv: Describe how to write a family</a></td><td class="wrap">Adds the driver-API guide for writing a CTLV family: the YAML specification, generated descriptors and callbacks, device lifecycle, operations, hooks, blobs, events and extension through inheritance.</td><td>3</td><td>19</td></tr>
+<tr><td><a href="walk-14.html">14</a></td><td><a href="walk-14.html">attestation: Add the base family specification and generated files</a></td><td class="wrap">Defines the base attestation CTLV family specification-first: the YAML spec, its ABI snapshot, registry entries, and the generated UAPI and kernel files.</td><td>10</td><td>52</td></tr>
+<tr><td><a href="walk-15.html">15</a></td><td><a href="walk-15.html">attestation: Prepare provider and instance core</a></td><td class="wrap">Introduces the attestation core module: the public provider descriptor (include/linux/attestation.h), the private instance object (core/internal.h) and the registry, validation and lifecycle code (core/core.c) that implement the generated base-family callbacks.</td><td>8</td><td>27</td></tr>
+<tr><td><a href="walk-16.html">16</a></td><td><a href="walk-16.html">attestation: Prepare measurement register journal</a></td><td class="wrap">Adds the measurement-register layer to the attestation core: per-instance MR objects built from the provider&#x27;s fixed MR list, an append-only journal of INFO and EXTEND entries keyed by MR generation, and a prepare/commit scheme for extensions that allocates everything (entry and event) before calling the provider so publication is infallible.</td><td>6</td><td>30</td></tr>
+<tr><td><a href="walk-17.html">17</a></td><td><a href="walk-17.html">attestation: Add CTLV operation handling</a></td><td class="wrap">This patch adds the translation layer between the generated CTLV attestation family (patch 14) and the provider/MR-journal core (patches 15-16): core/ctlv.c implements the per-operation handlers named by the family&#x27;s op table.</td><td>6</td><td>24</td></tr>
+<tr><td><a href="walk-18.html">18</a></td><td><a href="walk-18.html">tdx-guest: Expose the native attestation service API</a></td><td class="wrap">This patch refactors the TDX guest driver so that TDREPORT, Quote and RTMR operations are available as an in-kernel service (struct tdx_guest_ops) in addition to the existing misc ioctl, TSM report and TSM MR frontends, all sharing the same locks and buffers.</td><td>4</td><td>26</td></tr>
+<tr><td><a href="walk-19.html">19</a></td><td><a href="walk-19.html">attestation: Add the TDX family specification and generated files</a></td><td class="wrap">Declares the ctlv-attestation-tdx family (ID 2), a child of ctlv-attestation that fills the device-info extension point with TDX-specific measurement IDs.</td><td>9</td><td>19</td></tr>
+<tr><td><a href="walk-20.html">20</a></td><td><a href="walk-20.html">attestation: Add the TDX family implementation</a></td><td class="wrap">Implements the TDX attestation provider as a module that registers as a client of the native tdx-guest service (patch 18) and creates a ctlv-attestation-tdx instance per TDX device.</td><td>4</td><td>15</td></tr>
+</table>
+</main>
+</div>
+</body>
+</html>

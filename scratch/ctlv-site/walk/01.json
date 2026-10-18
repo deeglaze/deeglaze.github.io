@@ -1,0 +1,2016 @@
+{
+ "patch": 1,
+ "title": "ctlv: Add the schema language and generator",
+ "overview": "Introduces the whole build-time half of CTLV: three JSON-Schema meta-schemas under Documentation/ctlv/ that define the YAML spec language, the append-only family registry and the generated-file manifest, plus the Python package tools/ctlv/ctlvgen that consumes them. Layering inside the package: cli.py dispatches to tree/outputs (whole-tree actions) or loads one family via spec (meta-schema validation, registry) and semantics (cross-declaration checks, using sizes for length computation); compat checks/writes ABI snapshots; the gen_* modules (gen_uapi, gen_kernel, gen_family) render text using cgen for symbol naming and C formatting; outputs drives gen_* from the manifest; tree checks registry/spec/snapshot coverage. Everything depends on errors.CtlvError and the strict yamlload loader at the bottom. The Makefile and ctlv-regen.sh are the entry points used by developers and CI.",
+ "files": [
+  {
+   "path": "Documentation/ctlv/ctlv-registry-schema.yaml",
+   "purpose": "Meta-schema for the family registry file, an ordered list of family names whose index is the family ID. Used by spec.load_registry() to validate the registry before IDs are assigned.",
+   "units": [
+    {
+     "title": "Registry meta-schema",
+     "kind": "spec",
+     "start": 66,
+     "end": 103,
+     "anchor": "# SPDX-License-Identifier",
+     "summary": "Defines the registry as a non-empty, append-only array of names or {name, deprecated: true} objects.",
+     "details": "- Position is identity: index N is family ID N, the root family is entry 0 and cannot be deprecated.\n- A deprecated entry keeps its ID reserved rather than being removed.\n- Names are kebab-case, at most 63 characters (the length carried by family discovery)."
+    }
+   ]
+  },
+  {
+   "path": "Documentation/ctlv/ctlv-schema.yaml",
+   "purpose": "Meta-schema (JSON Schema draft-07 written in YAML) for a single family specification: the syntax gate that spec.load() applies before semantics.py performs cross-declaration checks.",
+   "units": [
+    {
+     "title": "Header and name/selector/number definitions",
+     "kind": "spec",
+     "start": 110,
+     "end": 166,
+     "anchor": "# SPDX-License-Identifier",
+     "summary": "Reusable $defs for kebab-case names, attr selectors, unsigned/integer bounds and max-occurrences.",
+     "details": "A selector is a set name, a whole group, or `group.attr`; there are no tuple or cross-family selectors. `max-occurrences: unlimited` is syntactically allowed here but semantically restricted to query replies."
+    },
+    {
+     "title": "Units, value lists and blob definitions",
+     "kind": "spec",
+     "start": 168,
+     "end": 229,
+     "anchor": "unit:",
+     "summary": "Defines the CTLV unit enum, enum/flags value lists (flags capped at 64 bits) and the blob placement descriptor.",
+     "details": "Enum values are numbered from 1 (0 reserved), flag bits from 0; both are append-only. A blob names a direction, allowed backings (only `va`) and an authoritative max-length independent of the inline message limit."
+    },
+    {
+     "title": "attr definition",
+     "kind": "spec",
+     "start": 231,
+     "end": 292,
+     "anchor": "attr:",
+     "summary": "The shape of one attr declaration and its closed set of keywords.",
+     "details": "Exactly one primary form among type, enum, flags, attrs and blob must be present (enforced semantically); `optional-attrs` and `recursive` only accompany `attrs`. Integers are always 64-bit; min/max/length/unit/scale/max-occurrences refine the payload."
+    },
+    {
+     "title": "attr-group, attr-set and placements",
+     "kind": "spec",
+     "start": 294,
+     "end": 338,
+     "anchor": "attr-group:",
+     "summary": "Groups (symbol-prefixed namespaces of attrs), attr sets (compositional units, possibly stubs) and request/reply placement lists.",
+     "details": "A stub set may be filled once by a descendant family. After composition every attr ID at one nesting level must still have a single placement."
+    },
+    {
+     "title": "op definition",
+     "kind": "spec",
+     "start": 340,
+     "end": 397,
+     "anchor": "op:",
+     "summary": "Operation declaration: type (action, query, event), fd-access, availability, optional, pre-post hooks, request/reply and suggested reply length.",
+     "details": "Many properties are limited to action/query by semantics.py (events are reply-only and always readable). `dynamic` availability is a permission and ops start enabled; `optional` ops are absent from introspection unless family init opts in; `pre-post` is kernel-only metadata that does not reach UAPI."
+    },
+    {
+     "title": "Top-level document structure",
+     "kind": "spec",
+     "start": 399,
+     "end": 468,
+     "anchor": "title: CTLV family",
+     "summary": "The root object: a required `family` block plus optional enums, flags, attr-groups, attr-sets and ops arrays.",
+     "details": "The family block holds the registered name (no numeric ID, which comes from registry position), the single `inherits` parent, and booleans for the generated pre-init, post-init and pre-fini callbacks."
+    }
+   ]
+  },
+  {
+   "path": "Documentation/ctlv/generated-files-schema.yaml",
+   "purpose": "Meta-schema for the generated-file manifest that tells outputs.py which spec generates which UAPI header, kernel header and kernel source, and where the registry's UAPI header lives.",
+   "units": [
+    {
+     "title": "Path, outputs and registry definitions",
+     "kind": "spec",
+     "start": 475,
+     "end": 523,
+     "anchor": "# SPDX-License-Identifier",
+     "summary": "Defines relative paths, the per-family outputs object and the registry entry with a mandatory uapi-header.",
+     "details": "Paths must not begin with '/', so every output is relative to the output root (the kernel tree or an alternate --output-root). A family may list any non-empty subset of uapi-header, kernel-header and kernel-source."
+    },
+    {
+     "title": "Manifest root",
+     "kind": "spec",
+     "start": 525,
+     "end": 538,
+     "anchor": "title: CTLV generated-file manifest",
+     "summary": "The manifest is version 1 with a registry entry and a non-empty list of families.",
+     "details": "Loaded by outputs.load(); tree.check() uses it to verify output coverage."
+    }
+   ]
+  },
+  {
+   "path": "MAINTAINERS",
+   "purpose": "Registers the CTLV subsystem entry so the new Documentation and tools trees have an owner.",
+   "units": [
+    {
+     "title": "Add CTLV SUBSYSTEM entry",
+     "kind": "config",
+     "start": 547,
+     "end": 552,
+     "anchor": "CTLV SUBSYSTEM",
+     "summary": "New MAINTAINERS section covering Documentation/ctlv/ and tools/ctlv/.",
+     "details": "Inserted alphabetically between the CS5535 audio and CTU CAN FD entries."
+    }
+   ]
+  },
+  {
+   "path": "tools/ctlv/Makefile",
+   "purpose": "Developer entry point for the generator: validation, ABI checking/updating, linting and regeneration, all driven through ctlvgen/cli.py over every spec in Documentation/ctlv/specs.",
+   "units": [
+    {
+     "title": "Spec discovery and validate/abi targets",
+     "kind": "build",
+     "start": 563,
+     "end": 590,
+     "anchor": "# SPDX-License-Identifier",
+     "summary": "Collects specs by wildcard and loops over them for validate, abi-check and abi-update.",
+     "details": "`all` runs validate and abi-check. abi-check fails when a spec no longer matches its checked-in snapshot; abi-update is the deliberate step that makes a UAPI change reviewable. Each target maps to a cli.py action (--validate, --abi-check, --abi-update)."
+    },
+    {
+     "title": "lint, regen, check-regen and clean",
+     "kind": "build",
+     "start": 592,
+     "end": 621,
+     "anchor": "# Style checks",
+     "summary": "Style checks via yamllint/pycodestyle/pyflakes, and regeneration targets that delegate to ctlv-regen.sh.",
+     "details": "yamllint is relaxed to allow `[ one, two ]` flow sequences, as in the tree's devicetree bindings. `regen` rewrites generated files; `check-regen` (ctlv-regen.sh -c) writes nothing and fails on drift."
+    }
+   ]
+  },
+  {
+   "path": "tools/ctlv/ctlv-regen.sh",
+   "purpose": "Thin wrapper that invokes cli.py with --outputs-update or --outputs-check on the root spec, reconciling all checked-in generated files against the manifests.",
+   "units": [
+    {
+     "title": "Header, option parsing and cli.py invocation",
+     "kind": "function",
+     "start": 628,
+     "end": 682,
+     "anchor": "#!/bin/bash",
+     "summary": "Parses -f/-c/-p, then execs cli.py on Documentation/ctlv/specs/ctlv.yaml with the matching outputs action.",
+     "details": "- `-c` selects --outputs-check (no writes); otherwise --outputs-update.\n- `-p DIR` becomes --output-root, redirecting where outputs are looked up/written.\n- `-f` is accepted for compatibility only, since reconciliation always renders everything.\n- Used by the Makefile's regen and check-regen targets."
+    }
+   ]
+  },
+  {
+   "path": "tools/ctlv/ctlvgen/__init__.py",
+   "purpose": "Package marker for ctlvgen.",
+   "units": [
+    {
+     "title": "Package marker",
+     "kind": "text",
+     "start": 689,
+     "end": 689,
+     "anchor": "SPDX-License-Identifier",
+     "summary": "Contains only the SPDX line; makes ctlvgen an importable package for the console script."
+    }
+   ]
+  },
+  {
+   "path": "tools/ctlv/ctlvgen/cli.py",
+   "purpose": "Command-line front end and top of the module layering: parses options, builds spec.Paths, and dispatches either to whole-tree actions (tree, outputs) or to loading one family (semantics.load) followed by validate, ABI check/update, or generation.",
+   "units": [
+    {
+     "title": "Header, imports and generator table",
+     "kind": "section",
+     "start": 696,
+     "end": 723,
+     "anchor": "#!/usr/bin/env python3",
+     "summary": "Makes the file runnable both as a script and as a package module, then imports every lib module.",
+     "details": "The sys.path append lets `from lib import ...` work when the Makefile or ctlv-regen.sh run the file directly. GENERATORS maps (mode, kind) to a renderer; only (uapi, header) is registered because kernel mode is handled specially."
+    },
+    {
+     "title": "main() - argument definitions",
+     "kind": "function",
+     "start": 725,
+     "end": 775,
+     "anchor": "def main():",
+     "summary": "Declares the options: spec/schema/registry/abi paths and a mutually exclusive set of actions.",
+     "details": "Actions: --validate, --abi-check, --abi-update, --tree-check, --tree-check-update, --registry-abi-update, --outputs-check, --outputs-update, or --mode {uapi,kernel}. Modifiers: --header/--source, --schema-only, -o, --cmp-out, --output-root."
+    },
+    {
+     "title": "main() - option consistency checks",
+     "kind": "function",
+     "start": 777,
+     "end": 794,
+     "anchor": "kinds = (args.header, args.source)",
+     "summary": "Rejects option combinations that do not make sense together.",
+     "details": "For example --mode needs --header or --source, --schema-only needs kernel mode, and --output-root is only valid with an outputs action."
+    },
+    {
+     "title": "main() - action dispatch",
+     "kind": "function",
+     "start": 795,
+     "end": 833,
+     "anchor": "paths = spec.Paths(",
+     "summary": "Runs the selected action and turns CtlvError into a message on stderr and exit status 1.",
+     "details": "- Tree-level actions (tree-check, outputs-*, registry-abi-update) never load a single family: they call tree.check/check_for_update/finish_update and outputs.reconcile.\n- Otherwise semantics.load(paths) yields the validated family, then cgen.symbols (validate), compat.check/_abi_update, or _generate.\n- registry-abi-update writes compat.registry_render() to paths.registry_abi."
+    },
+    {
+     "title": "_abi_update() and _generate()",
+     "kind": "function",
+     "start": 836,
+     "end": 867,
+     "anchor": "def _abi_update(",
+     "summary": "Writes the ABI snapshot, or renders UAPI/kernel text to stdout or a file.",
+     "details": "Kernel mode calls gen_kernel.render_header/render_source with family_api disabled by --schema-only. With --cmp-out an unchanged file is left untouched so its timestamp is preserved, which ctlv-regen.sh relies on."
+    }
+   ]
+  },
+  {
+   "path": "tools/ctlv/ctlvgen/lib/__init__.py",
+   "purpose": "Package marker for the lib subpackage of generator modules.",
+   "units": [
+    {
+     "title": "Package marker",
+     "kind": "text",
+     "start": 874,
+     "end": 874,
+     "anchor": "SPDX-License-Identifier",
+     "summary": "Contains only the SPDX line."
+    }
+   ]
+  },
+  {
+   "path": "tools/ctlv/ctlvgen/lib/cgen.py",
+   "purpose": "Shared C-output scaffolding for every ctlv generator: the `Writer` that formats lines under the 100-column kernel limit, the `Names` class that is the single source of every generated C identifier, and `symbols()` which rejects colliding names. gen_uapi, gen_kernel, gen_family and the user-space generator all call into it; it depends on `semantics`, `spec` and `errors` of the library.",
+   "units": [
+    {
+     "title": "Header, includes and constants",
+     "kind": "const",
+     "start": 881,
+     "end": 900,
+     "anchor": "# SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause",
+     "summary": "Module docstring, imports and the line-width constants.",
+     "details": "The docstring notes the preamble is what `ctlv-regen.sh` parses to recover the spec path and mode, so the spec path stays directly above the `CTLV-GEN` marker. `LINE_LIMIT`/`HARD_LINE_LIMIT` of 100 and `TAB_WIDTH` of 8 drive all wrapping."
+    },
+    {
+     "title": "KINDS and LIFECYCLE_API_SYMBOLS",
+     "kind": "const",
+     "start": 902,
+     "end": 927,
+     "anchor": "# C spelling of each primary form. A test checks t",
+     "summary": "Maps schema attr forms to `enum ctlv_schema_kind` spellings and lists the fixed lifecycle API names.",
+     "details": "`KINDS['nested']` is `CTLV_SCHEMA_NEST`; a test checks the table against the C enum. `LIFECYCLE_API_SYMBOLS` (`ctlv_create`, `ctlv_destroy`, the family hook typedefs, ...) are pre-registered in `symbols()` so a schema name cannot collide with them."
+    },
+    {
+     "title": "Case and width helpers",
+     "kind": "function",
+     "start": 930,
+     "end": 946,
+     "anchor": "def width(line):",
+     "summary": "`width()`, `ident()`, `macro()` and `enum_tag()` turn schema names into C spellings.",
+     "details": "`ident('ctlv-attestation','op')` gives `ctlv_attestation_op`; `macro()` upper-cases it; `enum_tag()` prefixes an underscore (`_ctlv_op`). `width()` expands tabs to 8 columns for wrapping."
+    },
+    {
+     "title": "Family constant and header names",
+     "kind": "function",
+     "start": 949,
+     "end": 982,
+     "anchor": "def family_suffix(family_name):",
+     "summary": "Computes the family-number constant and the include path of a family's generated headers.",
+     "details": "`family_const('ctlv')` is `CTLV_FAMILY_ROOT`, otherwise `CTLV_FAMILY_<NAME>` with any `ctlv-` prefix dropped. `uapi_header()` yields `<linux/x_gen.h>` (or `<uapi/linux/...>` inside the kernel). `kernel_header()` gives the root family an installed `<linux/ctlv_gen.h>` and every other family a private quoted `\"x_gen.h\"`."
+    },
+    {
+     "title": "spec_path()",
+     "kind": "function",
+     "start": 985,
+     "end": 1000,
+     "anchor": "def spec_path(path):",
+     "summary": "Returns the spec path relative to the kernel tree root so the preamble does not depend on the invocation directory.",
+     "details": "Walks upward until a directory containing `MAINTAINERS` is found and joins the components seen; outside a tree it returns the path as given."
+    },
+    {
+     "title": "wrapped()",
+     "kind": "function",
+     "start": 1003,
+     "end": 1031,
+     "anchor": "def wrapped(opening, items, closing, trailer='', a",
+     "summary": "Greedy wrapper for a parenthesized argument list, returning the output lines.",
+     "details": "Continuation lines are indented to the opening column. `trailer` accounts for a ` \\` on macro lines; `adaptive` lowers the indent so wide items still fit. Used by `Writer.parenthesized`, `signature` and `define_call`."
+    },
+    {
+     "title": "Writer - lines, comments, define_block",
+     "kind": "function",
+     "start": 1034,
+     "end": 1066,
+     "anchor": "class Writer:",
+     "summary": "Start of `Writer`, which accumulates the lines of one generated file.",
+     "details": "`comment()` emits a one-line `/* x */` or a multi-line block; `define_block()` emits a `#define` with backslash-continued body lines, wrapping a long parameter list itself."
+    },
+    {
+     "title": "Writer - define, define_call, declaration, parenthesized, assertion",
+     "kind": "function",
+     "start": 1068,
+     "end": 1117,
+     "anchor": "def define(self, name, value):",
+     "summary": "Single-statement emitters that fall back to a wrapped form past 100 columns.",
+     "details": "`define_call()` tries one line, then call on a continuation line, then wrapped arguments, e.g. `#define CTLV_ATTR_X(...) \\` followed by `\\tCTLV_ATTR(...)`. `declaration()` splits `prefix` and `declarator` onto two lines; `assertion()` breaks a `static_assert` after its operator."
+    },
+    {
+     "title": "Writer.signature()",
+     "kind": "function",
+     "start": 1119,
+     "end": 1146,
+     "anchor": "def signature(self, prefix, name, params, closing=",
+     "summary": "Emits a function prototype choosing among progressively more broken-up layouts.",
+     "details": "Tries one line, then arguments wrapped under the opening paren, then return type on its own line (keeping `*` pointer returns attached), then the arguments on a tab-indented continuation. Used for all family callback and hook prototypes."
+    },
+    {
+     "title": "Writer - guards, includes, text",
+     "kind": "function",
+     "start": 1148,
+     "end": 1165,
+     "anchor": "def open_guard(self, guard):",
+     "summary": "Include guard, include blocks and final serialization.",
+     "details": "`includes()` takes empty strings as group separators. `text()` strips trailing blank lines and ends with one newline, so output is byte-stable."
+    },
+    {
+     "title": "preamble()",
+     "kind": "function",
+     "start": 1168,
+     "end": 1179,
+     "anchor": "def preamble(origin, mode, kind, source=None):",
+     "summary": "Creates the Writer holding the SPDX line, the do-not-edit banner, the spec path and the `CTLV-GEN <mode> <kind>` marker.",
+     "details": "Sources get a `//` SPDX line, headers a `/* */` one. `ctlv-regen.sh` re-reads the spec path and `CTLV-GEN` line to regenerate; the committed `ctlv_gen.h` begins exactly this way."
+    },
+    {
+     "title": "Names - setup and owners",
+     "kind": "struct",
+     "start": 1182,
+     "end": 1198,
+     "anchor": "class Names:",
+     "summary": "`Names` holds the C naming rules for one effective family.",
+     "details": "Declarations are named after the family that owns them (`family.owners[family_id]`), so an inherited attr keeps the name its parent's header gave it. `prefix` is upper-case, `ident` lower-case."
+    },
+    {
+     "title": "Names - groups and attrs (UAPI)",
+     "kind": "function",
+     "start": 1200,
+     "end": 1243,
+     "anchor": "# Names that a family's UAPI header defines.",
+     "summary": "Names defined in a family's UAPI header for groups and attrs.",
+     "details": "e.g. `CTLV_GROUP_FAMILY`, `_CTLV_ATTR_FAMILY` (the group-attr macro), `CTLV_ATTR_FAMILY_ID`, plus `_UNIT`/`_SCALE` companions for attrs with units."
+    },
+    {
+     "title": "Names - sets, ops and definitions (UAPI)",
+     "kind": "function",
+     "start": 1245,
+     "end": 1287,
+     "anchor": "def attr_set(self, attr_set):",
+     "summary": "Names for attr sets, ops, and enum/flags definitions.",
+     "details": "`op()` is the local enumerator (`_CTLV_OP_FAMILIES_DUMP`), `op_id()` the complete ID macro (`CTLV_OP_FAMILIES_DUMP`). Flags have `_BIT` enumerators, a value, and a `_MASK`."
+    },
+    {
+     "title": "Names - kernel metadata",
+     "kind": "function",
+     "start": 1289,
+     "end": 1320,
+     "anchor": "# Names that a family's kernel metadata defines: i",
+     "summary": "Names of the tables and symbols in a family's generated kernel source and header.",
+     "details": "`ctlv_schema`, `ctlv_op_schemas`, `<op>_request_node_schemas` (file scope, no family prefix) and core-message names such as `<family>_<msg>_schema` and `<PREFIX>_<MSG>_MAX_LEN`."
+    },
+    {
+     "title": "Names - descriptor, callbacks and hooks",
+     "kind": "function",
+     "start": 1322,
+     "end": 1368,
+     "anchor": "# Names that a family's device descriptor defines.",
+     "summary": "Names the family descriptor, its op table, and callback/hook/helper functions.",
+     "details": "`ctlv_family`, `ctlv_ops`, callbacks `<owner>_<op>_<type>` (e.g. `ctlv_families_dump_query`), lifecycle hooks `<ident>_init`, and per-attr helper names named after the declaring family."
+    },
+    {
+     "title": "Names - input readers and hooks",
+     "kind": "function",
+     "start": 1370,
+     "end": 1396,
+     "anchor": "def input_name(self, scope, attr):",
+     "summary": "Names of placement-specific request readers and of family-wide and per-op pre/post hooks.",
+     "details": "`input_name()` builds a reader stem from the request scope path plus the attr, dropping a group name already implied and collapsing adjacent duplicates. Reader suffixes are `_ref`, `_present`, `_get`, `for_each`."
+    },
+    {
+     "title": "Names - file guards and user-space names",
+     "kind": "function",
+     "start": 1398,
+     "end": 1441,
+     "anchor": "# Where a generated file lives: the installed cons",
+     "summary": "Guard macros and header names per generated file, and names in the user-space binding.",
+     "details": "`_UAPI_LINUX_<PFX>_GEN_H`, `_LINUX_<PFX>_GEN_H`, `_CTLV_<PFX>_USER_GEN_H`; user-side helpers mirror kernel names (`user_op`, `user_op_len`, `user_spec`)."
+    },
+    {
+     "title": "Attr accessor classification",
+     "kind": "function",
+     "start": 1444,
+     "end": 1470,
+     "anchor": "def attr_getter_value(attr):",
+     "summary": "Decides which reader and writer helpers an attr gets.",
+     "details": "`attr_getter_value()` is false for blobs and repeated nests (they have no scalar getter). `input_readers()` returns ref + (iterator or present) + (resolve or get). `attr_writers()` returns `put` or `start` for nests, none for blobs since a reply never carries one."
+    },
+    {
+     "title": "Blob, event and user-length tables",
+     "kind": "const",
+     "start": 1473,
+     "end": 1490,
+     "anchor": "# What a blob attr may be backed by, and the libct",
+     "summary": "Static tables for blob putters, event helper suffixes and user-visible op lengths.",
+     "details": "`BLOB_PUTTERS` currently has only the `va` backing. `USER_LENGTHS` maps `sizes.OpSizes` members to length-name suffixes used for the user-mode header constants."
+    },
+    {
+     "title": "User-binding accessors",
+     "kind": "function",
+     "start": 1493,
+     "end": 1514,
+     "anchor": "def user_attr_readers(names, attr):",
+     "summary": "Names of readers and writers an attr gets in the userspace binding.",
+     "details": "Unlike the kernel side, a blob has one `put_<backing>` per backing its placement allows; reads of blobs are absent."
+    },
+    {
+     "title": "user_symbols()",
+     "kind": "function",
+     "start": 1517,
+     "end": 1553,
+     "anchor": "def user_symbols(family):",
+     "summary": "Collects every C name of a family's user-space binding, raising on duplicates.",
+     "details": "Covers local attrs' readers/writers, local ops (wrapper and `request_new`, or `is/subscribe/unsubscribe` for events) and non-zero length constants. A collision raises `CtlvError` naming both origins."
+    },
+    {
+     "title": "_stubs_anywhere()",
+     "kind": "function",
+     "start": 1556,
+     "end": 1558,
+     "anchor": "def _stubs_anywhere(node):",
+     "summary": "Recursive test for whether any node in a tree carries an extension point (stub)."
+    },
+    {
+     "title": "symbols() - lifecycle, families, fills",
+     "kind": "function",
+     "start": 1561,
+     "end": 1593,
+     "anchor": "def symbols(family):",
+     "summary": "Starts the kernel-side symbol table; registers fixed API names and per-owner family symbols.",
+     "details": "Dashes become underscores so two YAML names can collide in C; `add()` turns that into an error rather than a silently missing constant. Each ancestor family contributes `_op_schemas`, `_schema`, `_family`, `_op_pre/post` and `_device_*` names, since built-in families share one linker namespace."
+    },
+    {
+     "title": "symbols() - fills, definitions, groups, attrs",
+     "kind": "function",
+     "start": 1594,
+     "end": 1634,
+     "anchor": "for fill in family.fills:",
+     "summary": "Registers names for stub callbacks, enum/flag definitions, groups and attrs.",
+     "details": "Group enum and family-attr macro are registered once per owner via the `group_enums` and `family_attrs` sets."
+    },
+    {
+     "title": "symbols() - input readers and sets",
+     "kind": "function",
+     "start": 1635,
+     "end": 1659,
+     "anchor": "for ancestor in family.chain[:-1]:",
+     "summary": "Registers the request readers (own and each ancestor's) and attr-set names.",
+     "details": "Uses `semantics.input_scopes()` for every scope of every request/fill tree and `input_readers()` for the helper names."
+    },
+    {
+     "title": "symbols() - ops, messages and tables",
+     "kind": "function",
+     "start": 1660,
+     "end": 1705,
+     "anchor": "operation_enums = set()",
+     "summary": "Registers op, message, stub and node-schema table names, then returns the table.",
+     "details": "Events get a `_create` helper; actions and queries get a callback and optionally `provide`, `enable/disable` and per-op `pre/post`. Per-tree `<op>_request_node_schemas` names are registered too."
+    }
+   ]
+  },
+  {
+   "path": "tools/ctlv/ctlvgen/lib/compat.py",
+   "purpose": "The ABI snapshot writer and compatibility checker. It reduces an effective Family (from semantics.py) to a plain comparison-form dict, renders that as a compact checked-in YAML snapshot, and on check loads the snapshot, expands it back to the same form and reports every way the current schema fails to contain it. The ordered family registry gets the same treatment against its own baseline. Used by the ctlvgen entry point for abi-update and abi-check.",
+   "units": [
+    {
+     "title": "Header, imports and snapshot headers",
+     "kind": "text",
+     "start": 1712,
+     "end": 1748,
+     "anchor": "# SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause",
+     "summary": "Module docstring, imports and the YAML preambles written at the top of each snapshot.",
+     "details": "The docstring states the compatibility rule: everything in the snapshot must survive with the same IDs, no narrowed bound, and no placement turned required; new placements must be optional. `HEADER` is per-family; `REGISTRY_HEADER` is for the registry baseline."
+    },
+    {
+     "title": "_Dumper, _FlowMap, _FlowSeq",
+     "kind": "function",
+     "start": 1751,
+     "end": 1777,
+     "anchor": "class _Dumper(yaml.SafeDumper):",
+     "summary": "A YAML dumper tuned for the snapshot format, plus marker types that force flow-style output.",
+     "details": "`ignore_aliases` suppresses anchors (the strict loader in yamlload rejects them); `increase_indent` indents sequences under their key. `_FlowMap`/`_FlowSeq` are dict/list subclasses whose registered representers emit `{...}` and `[...]`."
+    },
+    {
+     "title": "build()",
+     "kind": "function",
+     "start": 1780,
+     "end": 1794,
+     "anchor": "def build(family):",
+     "summary": "Reduces an effective Family to the comparison-form dict covering only what the family itself declares.",
+     "details": "Uses the `local_*` views so inherited declarations are not repeated, but `family.fills` so stub fills the family provides are included. Delegates to `_definitions`, `_groups`, `_sets`, `_fills`, `_ops`."
+    },
+    {
+     "title": "render() and render_data()",
+     "kind": "function",
+     "start": 1797,
+     "end": 1808,
+     "anchor": "def render(family):",
+     "summary": "Produce the snapshot YAML text, compacting the comparison form and prefixing the header.",
+     "details": "`render_data` dumps `_compact(data)` with a very wide line limit, then re-wraps flow collections line by line with `_wrap_flow`. `render` is `render_data(build(family))`."
+    },
+    {
+     "title": "_wrap_flow()",
+     "kind": "function",
+     "start": 1811,
+     "end": 1841,
+     "anchor": "def _wrap_flow(line, width=80):",
+     "summary": "Wraps an over-long line holding a flow collection so continuation lines align after the opening bracket.",
+     "details": "Uses `_flow_items` to split top-level items, then fills lines greedily up to `width`, reserving room for the closing suffix on the last item."
+    },
+    {
+     "title": "_flow_items()",
+     "kind": "function",
+     "start": 1844,
+     "end": 1875,
+     "anchor": "def _flow_items(line, start):",
+     "summary": "Scans a flow collection and returns its closing index and its top-level comma-separated items.",
+     "details": "Tracks bracket nesting and quoted strings with backslash escapes; returns `(None, ())` on mismatched brackets or no close so the caller leaves the line alone."
+    },
+    {
+     "title": "check()",
+     "kind": "function",
+     "start": 1878,
+     "end": 1885,
+     "anchor": "def check(family, path):",
+     "summary": "Compares a family with its checked-in snapshot and raises one CtlvError listing all problems.",
+     "details": "Loads the snapshot with `yamlload.load`, `_expand`s it to comparison form and runs `_compare(old, build(family))`. Only removals, renumberings, narrowings and new required placements are problems; additions that are optional pass."
+    },
+    {
+     "title": "_compact()",
+     "kind": "function",
+     "start": 1888,
+     "end": 1928,
+     "anchor": "def _compact(data):",
+     "summary": "Turns comparison-form data into the terse structure that is dumped as the snapshot.",
+     "details": "Builds the `family` header map, then `enums`/`flags`, `attr-groups`, `attr-sets`, `fills` and `ops` sections, omitting empty ones and default values. Inverse of `_expand`."
+    },
+    {
+     "title": "_compact_groups() and _compact_attr()",
+     "kind": "function",
+     "start": 1931,
+     "end": 1986,
+     "anchor": "def _compact_groups(groups):",
+     "summary": "Compact the attr groups, writing each attr as one flow map with only non-default fields.",
+     "details": "`_compact_attr` selects `type`, `enum`, `flags` or `blob` as the primary key; omits integer bounds equal to the full u64/s64 range, string/binary min-length 0, alignment 1 and max-occurrences 1; a binary with equal min and max becomes `length`."
+    },
+    {
+     "title": "_compact_op()",
+     "kind": "function",
+     "start": 1989,
+     "end": 2009,
+     "anchor": "def _compact_op(op):",
+     "summary": "Compact one op into an `abi` flow map plus request and reply trees.",
+     "details": "Omits defaults for fd-access (never emitted for events), availability, optional and pre-post. A missing reply is left out while an empty reply tree is kept, which distinguishes ACK-only actions."
+    },
+    {
+     "title": "Tree compaction helpers",
+     "kind": "function",
+     "start": 2012,
+     "end": 2053,
+     "anchor": "def _compact_tree(nodes):",
+     "summary": "Compact a list of tree nodes into `attrs` and `optional-attrs` lists, nesting children as single-key maps.",
+     "details": "`_compact_tree` splits by `required` and goes to flow style when `_simple_tree_length` says the one-line form fits in 54 characters. `_compact_node` returns a bare name for a leaf or `{name: subtree}`, adding `reenters` for recursive nests."
+    },
+    {
+     "title": "_expand() and _expand_groups()",
+     "kind": "function",
+     "start": 2056,
+     "end": 2094,
+     "anchor": "def _expand(compact):",
+     "summary": "Rebuild the comparison-form dict from a loaded compact snapshot.",
+     "details": "Re-derives definitions from `enums`/`flags`, fills defaults for omitted family flags, and expands groups, sets, fills and ops with the helpers below."
+    },
+    {
+     "title": "_expand_attr()",
+     "kind": "function",
+     "start": 2097,
+     "end": 2135,
+     "anchor": "def _expand_attr(compact):",
+     "summary": "Restores one attr's full comparison form from its compact flow map, filling omitted defaults.",
+     "details": "Requires exactly one of `type`, `enum`, `flags` or `blob`; reconstructs the full integer range, string length bounds (`length` expands to min=max), blob fields and `unlimited` occurrences."
+    },
+    {
+     "title": "_expand_sets(), _expand_ops(), _expand_tree()",
+     "kind": "function",
+     "start": 2138,
+     "end": 2177,
+     "anchor": "def _expand_sets(attr_sets):",
+     "summary": "Expand the attr-set, op and tree sections of the snapshot.",
+     "details": "`_expand_ops` makes events have no request and no fd-access, and reply `None` when absent. `_expand_tree` yields required nodes first, then optional ones."
+    },
+    {
+     "title": "_expand_node()",
+     "kind": "function",
+     "start": 2180,
+     "end": 2197,
+     "anchor": "def _expand_node(selector, required):",
+     "summary": "Expands one tree entry, a bare name or a one-key map, into an attr or stub node.",
+     "details": "A name without a dot is a stub reference; with a dot it is a `group.attr`. Nested trees recurse and `reenters` is carried over. Malformed entries raise CtlvError."
+    },
+    {
+     "title": "Registry baseline: build, render, problems, check",
+     "kind": "function",
+     "start": 2200,
+     "end": 2242,
+     "anchor": "def registry_build(registry):",
+     "summary": "Normalizes, renders and checks the ordered family registry against its ABI baseline.",
+     "details": "`registry_problems` treats a family ID as its position: a removed or renamed entry, or a deprecated entry that was revived, is a problem. With `exact`, any remaining difference also demands a baseline update. `registry_check` loads the baseline via `spec.load_registry` and raises one CtlvError."
+    },
+    {
+     "title": "Comparison-form builders: _definitions, _groups, _attr, _sets",
+     "kind": "function",
+     "start": 2245,
+     "end": 2296,
+     "anchor": "def _definitions(items):",
+     "summary": "Convert effective definitions, groups, attrs and sets into plain dicts.",
+     "details": "`_attr` records only the declared fields (`min`, `max`, lengths, unit, scale, definition ref, blob parameters) plus `max-occurrences`; values are the declaration's own, not derived defaults."
+    },
+    {
+     "title": "_fills(), _ops() and tree builders",
+     "kind": "function",
+     "start": 2299,
+     "end": 2342,
+     "anchor": "def _fills(fills):",
+     "summary": "Convert stub fills, ops and expanded trees to comparison form.",
+     "details": "`_ops` records the op's local ID (not the full op ID), and fd-access only for non-events. `_tree` lists child nodes followed by stubs, `_node` records `reenters` instead of children for a recursive re-entry, and `_stub` records a stub's name and required flag."
+    },
+    {
+     "title": "_compare()",
+     "kind": "function",
+     "start": 2345,
+     "end": 2366,
+     "anchor": "def _compare(old, new):",
+     "summary": "Top-level comparison of a snapshot with the current ABI, collecting problems.",
+     "details": "Checks family name, ID, parent and the pre/post-init flags, then delegates to the per-section comparers. Parent changes are breaks because a family name carries its ancestry."
+    },
+    {
+     "title": "_compare_definitions() and _compare_groups()",
+     "kind": "function",
+     "start": 2369,
+     "end": 2401,
+     "anchor": "def _compare_definitions(problems, old, new):",
+     "summary": "Flag removed or renumbered enum/flags values and removed or renumbered groups and attrs.",
+     "details": "Only what the snapshot has is checked; new values, groups or attrs are fine. Attr comparison is handed to `_compare_attr`."
+    },
+    {
+     "title": "_compare_attr() and _compare_occurrences()",
+     "kind": "function",
+     "start": 2404,
+     "end": 2429,
+     "anchor": "def _compare_attr(problems, where, was, now):",
+     "summary": "Check one attr: identity fields unchanged, no narrowed bound, no narrowed occurrences, blob unchanged in shape.",
+     "details": "`local-id`, `kind`, `definition`, `unit`, `scale` must match exactly. Raising `min`/`min-length` or lowering `max`/`max-length` is narrowing. Occurrences narrow if unlimited became limited or the maximum dropped."
+    },
+    {
+     "title": "_compare_blob()",
+     "kind": "function",
+     "start": 2432,
+     "end": 2442,
+     "anchor": "def _compare_blob(problems, where, was, now):",
+     "summary": "Check blob attr parameters: direction and alignment fixed, backings only added, max-length not reduced.",
+     "details": "Called from `_compare_attr` when the snapshot attr has a `blob` entry."
+    },
+    {
+     "title": "_compare_sets() and _compare_fills()",
+     "kind": "function",
+     "start": 2445,
+     "end": 2465,
+     "anchor": "def _compare_sets(problems, old, new):",
+     "summary": "Sets must keep their IDs and stub status; stub fills must remain and may not drop or newly require nodes.",
+     "details": "Fill trees are compared with `_compare_nodes`."
+    },
+    {
+     "title": "_compare_ops()",
+     "kind": "function",
+     "start": 2468,
+     "end": 2491,
+     "anchor": "def _compare_ops(problems, old, new):",
+     "summary": "Check each op for removal and unchanged IDs/type/access fields, then compare request and reply trees.",
+     "details": "An ACK-only action (reply `None`) may not gain a reply schema, and a schema present may not be removed. Per-device enablement is not compared, only what userspace compiles against."
+    },
+    {
+     "title": "_compare_nodes()",
+     "kind": "function",
+     "start": 2494,
+     "end": 2514,
+     "anchor": "def _compare_nodes(problems, where, old, new):",
+     "summary": "Recursively compares tree nodes by key: nothing removed, nothing made required, re-entry unchanged, new nodes optional.",
+     "details": "Nodes are matched by `_node_key`, attr or stub name. Anything left in the new tree without a counterpart must be optional."
+    },
+    {
+     "title": "_node_key(), _node_name(), _occurrences()",
+     "kind": "function",
+     "start": 2517,
+     "end": 2532,
+     "anchor": "def _node_key(node):",
+     "summary": "Small helpers for node identity and message formatting."
+    }
+   ]
+  },
+  {
+   "path": "tools/ctlv/ctlvgen/lib/errors.py",
+   "purpose": "Defines the one exception type the tool raises, caught in cli.main() and printed as `ctlvgen: ...`. Imported by nearly every lib module.",
+   "units": [
+    {
+     "title": "CtlvError",
+     "kind": "struct",
+     "start": 2539,
+     "end": 2552,
+     "anchor": "# SPDX-License-Identifier",
+     "summary": "Exception carrying a location (`where`) and a message (`what`) for any unacceptable spec, registry or snapshot.",
+     "details": "The message is `where: what`, or just `what` with no location. The docstring notes that the test suite matches diagnostics, so wording is effectively contract."
+    }
+   ]
+  },
+  {
+   "path": "tools/ctlv/ctlvgen/lib/gen_family.py",
+   "purpose": "Emits the family-API half of a family's kernel header and source: callback prototypes, hook and lifecycle declarations, the reader/writer/event helper macros, the op binding table and the `struct ctlv_family` descriptor. gen_kernel calls `emit_header()` and `emit_source()` when `family_api` is set; the C macros it instantiates (`CTLV_IN_REF`, `CTLV_PUT_*`, `CTLV_OP_*`) live in the headers from the core patches.",
+   "units": [
+    {
+     "title": "Header and imports",
+     "kind": "doc",
+     "start": 2559,
+     "end": 2573,
+     "anchor": "# SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause",
+     "summary": "License, docstring and imports.",
+     "details": "A family answers only what it declared; an inherited op is answered through the declaring family's descriptor."
+    },
+    {
+     "title": "Callback, hook and lifecycle tables",
+     "kind": "const",
+     "start": 2575,
+     "end": 2604,
+     "anchor": "# The family's priv, the request/reply, and a cont",
+     "summary": "Parameter lists for generated prototypes.",
+     "details": "`CALLBACK_PARAMS` is `(priv, ctx, request, reply)`. A `pre` hook returns `int` (may refuse the op), `post` returns `void`. `LIFECYCLE_HOOKS` lists priv_size/pre_init/init/post_init/pre_fini/fini; `pre_init`, `post_init`, `pre_fini` are only emitted when the spec declares them. `STUB_HOOKS` is the `fill` callback of an extension point."
+    },
+    {
+     "title": "ReaderScope and macro tables",
+     "kind": "struct",
+     "start": 2607,
+     "end": 2635,
+     "anchor": "@dataclasses.dataclass(frozen=True)",
+     "summary": "A reader scope pins one request node to its place in the emitted node-schema array; two tables map attr kinds to macro suffixes.",
+     "details": "`INPUT_MACROS` picks the `CTLV_IN_<X>` getter (`enum` and `flags` read as `U64`), `PUT_MACROS` the `CTLV_PUT_<X>` writer (no blob, since replies never carry one)."
+    },
+    {
+     "title": "bindings(), _implementer(), _macro()",
+     "kind": "function",
+     "start": 2638,
+     "end": 2655,
+     "anchor": "def bindings(family):",
+     "summary": "Small helpers: which ops the family binds, who writes the callbacks, and wrapped macro-call output.",
+     "details": "`bindings()` is local actions and queries; events are emitted by nobody and inherited ops belong to the parent."
+    },
+    {
+     "title": "emit_header()",
+     "kind": "function",
+     "start": 2658,
+     "end": 2681,
+     "anchor": "def emit_header(writer, names, family, reader_scop",
+     "summary": "Appends the family API to the kernel header.",
+     "details": "Order: callback prototypes, hooks, lifecycle, stub fills, `extern const struct ctlv_family`, then inside `#ifndef _CTLV_GENERATED_METADATA_ONLY` the helper macros. That guard lets the generated `.c` include the header for just the declarations."
+    },
+    {
+     "title": "_hooks()",
+     "kind": "function",
+     "start": 2684,
+     "end": 2702,
+     "anchor": "def _hooks(writer, names, family):",
+     "summary": "Declares the family-wide and per-op pre/post hook prototypes.",
+     "details": "e.g. `int ctlv_op_pre(void *priv, struct ctlv_op_ctx *ctx);` and `void ctlv_op_post(...)`; per-op pairs only for ops marked `pre_post`."
+    },
+    {
+     "title": "Lifecycle hooks",
+     "kind": "function",
+     "start": 2705,
+     "end": 2719,
+     "anchor": "def _declared_lifecycle_hooks(family):",
+     "summary": "Declares the priv lifecycle functions the family implements.",
+     "details": "`pre_init` returns `const void *` (emitted as `*name`). Only declared hooks are included, and the same filter feeds the descriptor."
+    },
+    {
+     "title": "_stub_hooks()",
+     "kind": "function",
+     "start": 2722,
+     "end": 2732,
+     "anchor": "def _stub_hooks(writer, names, family):",
+     "summary": "Declares the fill callback for each extension point this family fills."
+    },
+    {
+     "title": "_helpers()",
+     "kind": "function",
+     "start": 2735,
+     "end": 2750,
+     "anchor": "def _helpers(writer, names, family):",
+     "summary": "Emits `CTLV_OP_PROVIDE`, `CTLV_OP_ENABLE` and `CTLV_OP_DISABLE` instantiations for optional or dynamic ops.",
+     "details": "These are how a device publishes an optional op or toggles a dynamically available one."
+    },
+    {
+     "title": "_readers()",
+     "kind": "function",
+     "start": 2753,
+     "end": 2777,
+     "anchor": "def _readers(writer, names, scopes):",
+     "summary": "Emits request-reading macros for every reader scope.",
+     "details": "Per attr: `CTLV_IN_REF(name, tree, attr, node_index, slot, kind)`, then `CTLV_IN_FOR_EACH` (repeated) or `CTLV_IN_HAS` (single), then a typed getter such as `CTLV_IN_U64(name)`, or a `BLOB` resolver for blobs."
+    },
+    {
+     "title": "_writers()",
+     "kind": "function",
+     "start": 2780,
+     "end": 2801,
+     "anchor": "def _writers(writer, names, family):",
+     "summary": "Emits `CTLV_PUT_*` / `CTLV_NEST_START` wrappers for each local attr that can be written.",
+     "details": "Each yields a helper such as `<family>_<group>_<attr>_put` that returns whether the attr made it into the reply."
+    },
+    {
+     "title": "_creators()",
+     "kind": "function",
+     "start": 2804,
+     "end": 2817,
+     "anchor": "def _creators(writer, names, family):",
+     "summary": "Emits `CTLV_EVENT_CREATE` for each local event op.",
+     "details": "The created context is passed once to `ctlv_event_emit()` or `ctlv_event_abort()`."
+    },
+    {
+     "title": "Reader helpers",
+     "kind": "function",
+     "start": 2820,
+     "end": 2833,
+     "anchor": "def _input_name(names, scope, attr):",
+     "summary": "Derive the macro stem, argument list and `for_each` define for repeated attrs.",
+     "details": "`_iterator` emits `#define <name>_for_each(_attr, _nest) CTLV_IN_FOR_EACH(...)`."
+    },
+    {
+     "title": "emit_source()",
+     "kind": "function",
+     "start": 2836,
+     "end": 2840,
+     "anchor": "def emit_source(writer, names, family):",
+     "summary": "Entry point for the source half: bindings, stub ops, then the descriptor."
+    },
+    {
+     "title": "_bindings()",
+     "kind": "function",
+     "start": 2843,
+     "end": 2855,
+     "anchor": "def _bindings(writer, names, family):",
+     "summary": "Emits the static `struct ctlv_op` table.",
+     "details": "e.g. `CTLV_OP_QUERY(ctlv_families_dump),`, with `_PRE_POST` appended for per-op hooks; this is `ctlv_ops[]` in `drivers/ctlv/ctlv_gen.c`."
+    },
+    {
+     "title": "_stub_ops()",
+     "kind": "function",
+     "start": 2858,
+     "end": 2871,
+     "anchor": "def _stub_ops(writer, names, family):",
+     "summary": "Emits the `struct ctlv_stub_ops` table for the extension points this family fills.",
+     "details": "Entries are `CTLV_STUB_OPS(family_const, set, callback_stem)` in the same order as `stub_fill_schemas`."
+    },
+    {
+     "title": "_descriptor()",
+     "kind": "function",
+     "start": 2874,
+     "end": 2898,
+     "anchor": "def _descriptor(writer, names, family):",
+     "summary": "Emits the exported `struct ctlv_family` descriptor.",
+     "details": "Fields: `.schema`, `.parent`, `.ops`/`.ops_count`, `.pre/.post`, lifecycle hooks and stub ops. Ends with `EXPORT_SYMBOL_NS_GPL(<name>, \"CTLV\")`, the one symbol a child family module needs."
+    },
+    {
+     "title": "_parent_descriptor()",
+     "kind": "function",
+     "start": 2901,
+     "end": 2905,
+     "anchor": "def _parent_descriptor(family):",
+     "summary": "Returns the direct parent's descriptor name, or None for the root."
+    }
+   ]
+  },
+  {
+   "path": "tools/ctlv/ctlvgen/lib/gen_kernel.py",
+   "purpose": "Renders the kernel metadata of a family: the header (`render_header`) and the source (`render_source`) that hold the flat node-schema arrays, op schema table, family schema, uevent and size static_asserts. For the ctlv family these are `include/linux/ctlv_gen.h` and `drivers/ctlv/ctlv_gen.c`. Delegates callbacks/descriptor emission to gen_family.",
+   "units": [
+    {
+     "title": "Header, root macros and constants",
+     "kind": "const",
+     "start": 2912,
+     "end": 2955,
+     "anchor": "# SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause",
+     "summary": "Imports, root-family macro lookups, inline-length fields and symbolic integer extremes.",
+     "details": "`FD_ACCESSES` and `AVAILABILITIES` map spec values to root-family UAPI constants (e.g. `CTLV_OP_FD_ACCESS_READ`). `EXTREMES` lets bounds print as `U64_MAX`, `S64_MIN`, etc. `INLINE_FIELDS` are the sizes checked against the inline message limit."
+    },
+    {
+     "title": "FlatNode",
+     "kind": "struct",
+     "start": 2958,
+     "end": 2965,
+     "anchor": "@dataclasses.dataclass(frozen=True)",
+     "summary": "One node of a flattened tree, with its children as an index range."
+    },
+    {
+     "title": "flatten()",
+     "kind": "function",
+     "start": 2968,
+     "end": 2995,
+     "anchor": "def flatten(root):",
+     "summary": "Lays a schema tree out breadth first into the array the core walks by index.",
+     "details": "Children of a node occupy consecutive slots from `first_child`. A re-entering node (recursive nest) copies the index range of the ancestor it re-enters, recorded in `levels` keyed by `node.expands`, which keeps the array finite."
+    },
+    {
+     "title": "stub_schemas()",
+     "kind": "function",
+     "start": 2998,
+     "end": 3004,
+     "anchor": "def stub_schemas(root):",
+     "summary": "Lists each extension point of a tree with the node index it widens."
+    },
+    {
+     "title": "render_header()",
+     "kind": "function",
+     "start": 3007,
+     "end": 3035,
+     "anchor": "def render_header(family, *, family_api):",
+     "summary": "Returns the generated kernel header text.",
+     "details": "Declares `ctlv_op_schemas[]`, `ctlv_schema`, the core-message declarations and, with `family_api`, the family API from gen_family. Calls `cgen.symbols()` first so name collisions fail early."
+    },
+    {
+     "title": "_reader_scopes()",
+     "kind": "function",
+     "start": 3038,
+     "end": 3056,
+     "anchor": "def _reader_scopes(family, names):",
+     "summary": "Pairs each input scope with the C expression of its tree and its node index in the flattened array.",
+     "details": "Trees are `&ctlv_op_schemas[i].request` or a stub fill's members; indexes cached per (kind, index) via `flatten()`. Results are `gen_family.ReaderScope` for the reader macros."
+    },
+    {
+     "title": "_message_decls()",
+     "kind": "function",
+     "start": 3059,
+     "end": 3067,
+     "anchor": "def _message_decls(writer, names, family):",
+     "summary": "Declares MAX_LEN constants and `extern` schema trees for core-built messages."
+    },
+    {
+     "title": "_header_includes()",
+     "kind": "function",
+     "start": 3070,
+     "end": 3079,
+     "anchor": "def _header_includes(family, names, family_api):",
+     "summary": "Chooses headers for the generated header.",
+     "details": "Metadata-only headers include just `<linux/ctlv_family.h>`; with the family API it adds err/errno, the family's UAPI header and the direct parent's kernel header (unless the parent is the root)."
+    },
+    {
+     "title": "render_source()",
+     "kind": "function",
+     "start": 3082,
+     "end": 3106,
+     "anchor": "def render_source(family, *, family_api):",
+     "summary": "Returns the generated kernel source text.",
+     "details": "Order: includes; per-tree node arrays and stub schemas; fills; messages; `ctlv_op_schemas[]`; family schema; uevent and limit static_asserts; then family bindings from `gen_family.emit_source()`. With `family_api` it defines `_CTLV_GENERATED_METADATA_ONLY` first."
+    },
+    {
+     "title": "Tree enumeration and includes",
+     "kind": "function",
+     "start": 3109,
+     "end": 3157,
+     "anchor": "def _trees(family):",
+     "summary": "Enumerates every request/reply tree and derives the include list.",
+     "details": "`_trees()` gives (op, 'request'|'reply', root) for local ops. `_kinds()` finds which attr kinds appear so `<linux/bits.h>` (blobs) and `<linux/limits.h>` (integer bounds) are only included when needed."
+    },
+    {
+     "title": "Node schema array emission",
+     "kind": "function",
+     "start": 3160,
+     "end": 3178,
+     "anchor": "def _has_event(family):",
+     "summary": "Emits `static const struct ctlv_node_schema x_request_node_schemas[] = {...};`.",
+     "details": "Each flat node becomes one macro entry; blob entries use the special multi-line layout."
+    },
+    {
+     "title": "_blob_node()",
+     "kind": "function",
+     "start": 3181,
+     "end": 3193,
+     "anchor": "def _blob_node(writer, macro, args):",
+     "summary": "Formats a `CTLV_NODE_SCHEMA_BLOB` entry with one backing per line.",
+     "details": "The backings are an OR of `BIT(CTLV_BLOB_TYPE_*)` terms, split on ` | `."
+    },
+    {
+     "title": "_node_initializer()",
+     "kind": "function",
+     "start": 3196,
+     "end": 3221,
+     "anchor": "def _node_initializer(family, names, flat):",
+     "summary": "Builds the macro name and arguments of one node.",
+     "details": "Root: `CTLV_NODE_SCHEMA_ROOT(first, count, required)`. Otherwise `CTLV_NODE_SCHEMA_<KIND>(attr, occurrences, ...)`; a nest adds child range and gets `_REENTERS` when recursive; unit-bearing integers get `_UNIT`. Real example: `CTLV_NODE_SCHEMA_STRING(CTLV_ATTR_FAMILY_NAME, 1, 0, 63)`."
+    },
+    {
+     "title": "_stub_schemas()",
+     "kind": "function",
+     "start": 3224,
+     "end": 3240,
+     "anchor": "def _stub_schemas(writer, family, names, op, which",
+     "summary": "Emits the `ctlv_stub_schema` array of extension points inside one tree.",
+     "details": "Entries are `CTLV_STUB_SCHEMA[_OPTIONAL](family_const, set, node_index)`."
+    },
+    {
+     "title": "_stub_fill_schemas()",
+     "kind": "function",
+     "start": 3243,
+     "end": 3259,
+     "anchor": "def _stub_fill_schemas(writer, family, names):",
+     "summary": "Emits the node arrays and `ctlv_stub_fill_schema` table for stubs this family fills."
+    },
+    {
+     "title": "_messages()",
+     "kind": "function",
+     "start": 3262,
+     "end": 3276,
+     "anchor": "def _messages(writer, family, names):",
+     "summary": "Emits node arrays and a `struct ctlv_schema_tree` for each core-built message, plus a static_assert that MAX_LEN fits its limit."
+    },
+    {
+     "title": "_constraint_args()",
+     "kind": "function",
+     "start": 3279,
+     "end": 3297,
+     "anchor": "def _constraint_args(family, names, decl):",
+     "summary": "Kind-specific trailing arguments of a node macro.",
+     "details": "Integers: min, max (plus unit and scale); enum: highest value; flags: mask; string/binary: min/max length; blob: from `_blob_args`."
+    },
+    {
+     "title": "Bounds and blob arguments",
+     "kind": "function",
+     "start": 3300,
+     "end": 3319,
+     "anchor": "def _bound(kind, value):",
+     "summary": "Formats numeric bounds and blob constraints.",
+     "details": "`_bound()` prefers `U64_MAX` etc., adds `ULL` above `S64_MAX`. `_blob_args()` yields max length, alignment, backing mask, direction."
+    },
+    {
+     "title": "_table()",
+     "kind": "function",
+     "start": 3322,
+     "end": 3333,
+     "anchor": "def _table(writer, names, family):",
+     "summary": "Emits the `ctlv_op_schemas[]` table of local ops."
+    },
+    {
+     "title": "_op_schema_initializer()",
+     "kind": "function",
+     "start": 3336,
+     "end": 3361,
+     "anchor": "def _op_schema_initializer(names, op):",
+     "summary": "Builds one `CTLV_OP_SCHEMA_{ACTION,QUERY,EVENT}` entry.",
+     "details": "Arguments are op ID, fd access, availability, the computed sizes from `op.sizes`, and request/reply trees; `.optional = true` and `.pre_post = true` are appended as designated initializers."
+    },
+    {
+     "title": "_op_tree()",
+     "kind": "function",
+     "start": 3364,
+     "end": 3370,
+     "anchor": "def _op_tree(op, which):",
+     "summary": "Chooses `CTLV_SCHEMA_TREE_NONE()`, `CTLV_SCHEMA_TREE` or `CTLV_SCHEMA_TREE_STUBS` for an op side."
+    },
+    {
+     "title": "_descriptor()",
+     "kind": "function",
+     "start": 3373,
+     "end": 3389,
+     "anchor": "def _descriptor(writer, names, family):",
+     "summary": "Emits `const struct ctlv_family_schema <name>_schema`.",
+     "details": "Holds name, family ID (registry position), op schemas and stub fill schemas, e.g. `.name = \"ctlv\"`."
+    },
+    {
+     "title": "_uevent()",
+     "kind": "function",
+     "start": 3392,
+     "end": 3404,
+     "anchor": "def _uevent(writer, family):",
+     "summary": "Emits static_asserts bounding the device uevent environment for the family chain.",
+     "details": "Variables are `CTLV_FAMILY`, `CTLV_COMPATIBLE_<i>` per chain member, and `CTLV_COMPATIBLE_N`; each costs its length plus NUL."
+    },
+    {
+     "title": "_limits()",
+     "kind": "function",
+     "start": 3407,
+     "end": 3421,
+     "anchor": "def _limits(writer, family, trees):",
+     "summary": "Emits static_asserts that generated maxima fit the core limits.",
+     "details": "Checks inline message length, event record length against the event queue, and nest depth against `CTLV_MAX_DECLARED_NEST_DEPTH`."
+    },
+    {
+     "title": "_nest_depth()",
+     "kind": "function",
+     "start": 3424,
+     "end": 3428,
+     "anchor": "def _nest_depth(node):",
+     "summary": "Recursively computes the deepest nest below a node."
+    }
+   ]
+  },
+  {
+   "path": "tools/ctlv/ctlvgen/lib/gen_uapi.py",
+   "purpose": "Renders a family's installed UAPI header (`include/uapi/linux/<family>_gen.h`) and the registry's family-number header. These carry only names for numbers: enum values, flag bits, group/set/op IDs and unit constants; they are included by the kernel metadata and by user space.",
+   "units": [
+    {
+     "title": "Header and constants",
+     "kind": "doc",
+     "start": 3435,
+     "end": 3451,
+     "anchor": "# SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause",
+     "summary": "License, docstring and comment width."
+    },
+    {
+     "title": "render()",
+     "kind": "function",
+     "start": 3454,
+     "end": 3472,
+     "anchor": "def render(family):",
+     "summary": "Returns one family's UAPI header text.",
+     "details": "Order: file comment, guard, includes, definitions, groups, sets, ops. See `include/uapi/linux/ctlv_gen.h`."
+    },
+    {
+     "title": "render_families()",
+     "kind": "function",
+     "start": 3475,
+     "end": 3488,
+     "anchor": "def render_families(registry):",
+     "summary": "Renders `ctlv_families_gen.h`, one sequential enum `_ctlv_family` of family numbers from the registry order.",
+     "details": "Constants such as `CTLV_FAMILY_ROOT`; the family ID is the entry's position."
+    },
+    {
+     "title": "_includes() and _file_comment()",
+     "kind": "function",
+     "start": 3491,
+     "end": 3518,
+     "anchor": "def _includes(family):",
+     "summary": "Chooses includes (`<linux/ctlv.h>`, families header, parent's header, `<linux/const.h>` for flags) and writes the wrapped file comment.",
+     "details": "Inheriting from the parent's header means one include covers the effective schema."
+    },
+    {
+     "title": "_own() and _definitions()",
+     "kind": "function",
+     "start": 3521,
+     "end": 3533,
+     "anchor": "def _own(family, declarations):",
+     "summary": "Filters to declarations the family owns itself and emits each enum/flags definition."
+    },
+    {
+     "title": "_enum() and _flags()",
+     "kind": "function",
+     "start": 3536,
+     "end": 3555,
+     "anchor": "def _enum(writer, names, definition):",
+     "summary": "Emit enum definitions and flag definitions.",
+     "details": "Flags yield a bit-index enum (`..._BIT`), then `#define X _BITULL(X_BIT)` per flag, then a `_MASK` of all."
+    },
+    {
+     "title": "_groups()",
+     "kind": "function",
+     "start": 3558,
+     "end": 3587,
+     "anchor": "def _groups(writer, family, names):",
+     "summary": "Emits the group enum, the family attr macro and per-group attr enums and IDs.",
+     "details": "For each group: `#define _<PFX>_ATTR_<G>(_attr) _<PFX>_ATTR(GROUP, ..##_attr)`, a local enum, and per-attr `#define <PFX>_ATTR_<G>_<A>` full IDs."
+    },
+    {
+     "title": "_attr() and _attr_metadata()",
+     "kind": "function",
+     "start": 3590,
+     "end": 3606,
+     "anchor": "def _attr(writer, names, group, attr):",
+     "summary": "Define each attr's full ID and, for attrs with units, a metadata enum with `_UNIT` and `_SCALE`."
+    },
+    {
+     "title": "_sequential_enum() and _flags_mask()",
+     "kind": "function",
+     "start": 3609,
+     "end": 3628,
+     "anchor": "def _sequential_enum(writer, name, values):",
+     "summary": "Shared enum writer asserting values are consecutive, and the multi-line OR mask define.",
+     "details": "Only the first enumerator gets an explicit `= n` if non-zero."
+    },
+    {
+     "title": "_sets()",
+     "kind": "function",
+     "start": 3631,
+     "end": 3639,
+     "anchor": "def _sets(writer, family, names):",
+     "summary": "Emits the attr-set ID enum."
+    },
+    {
+     "title": "_ops()",
+     "kind": "function",
+     "start": 3642,
+     "end": 3657,
+     "anchor": "def _ops(writer, family, names):",
+     "summary": "Emits the op enum, the `_CTLV_OP(_op)` macro and the complete op ID defines."
+    }
+   ]
+  },
+  {
+   "path": "tools/ctlv/ctlvgen/lib/outputs.py",
+   "purpose": "Plans, renders and reconciles the full set of generated files listed in the manifests, calling `semantics`, `gen_uapi` and `gen_kernel`.",
+   "units": [
+    {
+     "title": "Header, flavours and identities",
+     "kind": "const",
+     "start": 3664,
+     "end": 3699,
+     "anchor": "# SPDX-License-Identifier",
+     "summary": "Imports and tables mapping output flavours to renderers, to marker identities and to required sets.",
+     "details": "`FLAVOURS` maps names to render functions in `gen_uapi`/`gen_kernel`; `IDENTITIES` gives (mode, kind, suffix) used in the CTLV-GEN marker."
+    },
+    {
+     "title": "Output",
+     "kind": "struct",
+     "start": 3702,
+     "end": 3708,
+     "anchor": "@dataclasses.dataclass",
+     "summary": "One planned generated file: family, source, registry, flavour and destination path.",
+     "details": "family is None for the registry-derived output."
+    },
+    {
+     "title": "Path helpers",
+     "kind": "function",
+     "start": 3711,
+     "end": 3727,
+     "anchor": "def _spec_paths(",
+     "summary": "Build a `spec.Paths` for a manifest source, check a path is normalized relative, and convert to repository-relative."
+    },
+    {
+     "title": "_manifest_contexts()",
+     "kind": "function",
+     "start": 3730,
+     "end": 3743,
+     "anchor": "def _manifest_contexts(",
+     "summary": "Lists the manifests to process: the real one and, if present, the test-fixture one.",
+     "details": "Each context holds manifest path, expected registry, source dir, expected family names and a fixture flag."
+    },
+    {
+     "title": "load() - registry outputs",
+     "kind": "function",
+     "start": 3746,
+     "end": 3781,
+     "anchor": "def load(paths)",
+     "summary": "Loads and validates each manifest and plans the registry-level outputs.",
+     "details": "Checks the manifest against its schema, the registry source, the family list, and output suffix and uniqueness."
+    },
+    {
+     "title": "load() - family outputs",
+     "kind": "function",
+     "start": 3783,
+     "end": 3827,
+     "anchor": "for record in records:",
+     "summary": "Validates every family record and plans its outputs.",
+     "details": "Checks uniqueness, source path, required flavours (the root gets all), that the loaded family matches the name, and each destination."
+    },
+    {
+     "title": "render()",
+     "kind": "function",
+     "start": 3830,
+     "end": 3859,
+     "anchor": "def render(paths, plan)",
+     "summary": "Renders all planned outputs in memory before touching any file.",
+     "details": "Families are cached per source/registry; the generated text must carry the expected marker identity."
+    },
+    {
+     "title": "_output_source()",
+     "kind": "function",
+     "start": 3862,
+     "end": 3863,
+     "anchor": "def _output_source(",
+     "summary": "Return the source path as a POSIX string."
+    },
+    {
+     "title": "_marked_files()",
+     "kind": "function",
+     "start": 3866,
+     "end": 3886,
+     "anchor": "def _marked_files(",
+     "summary": "Finds files in the tree carrying a CTLV-GEN marker.",
+     "details": "Uses `git grep` in a git checkout, otherwise globbing, skipping symlinks."
+    },
+    {
+     "title": "_destination()",
+     "kind": "function",
+     "start": 3889,
+     "end": 3901,
+     "anchor": "def _destination(",
+     "summary": "Resolves a destination under the root, refusing symlinks and escapes."
+    },
+    {
+     "title": "_replace()",
+     "kind": "function",
+     "start": 3904,
+     "end": 3915,
+     "anchor": "def _replace(",
+     "summary": "Atomically writes a file through a temporary file and `os.replace`."
+    },
+    {
+     "title": "_identity()",
+     "kind": "function",
+     "start": 3918,
+     "end": 3943,
+     "anchor": "def _identity(text)",
+     "summary": "Parses the generated-file marker header and returns (source, mode, kind) or None.",
+     "details": "Handles C and reST comment styles; `render()`, `_marked_files()` and `reconcile()` rely on it."
+    },
+    {
+     "title": "reconcile() - plan and unexpected files",
+     "kind": "function",
+     "start": 3946,
+     "end": 3959,
+     "anchor": "def reconcile(",
+     "summary": "Loads and renders the plan, then rejects marked files that the plan does not mention.",
+     "details": "Entry point for the regen and check modes."
+    },
+    {
+     "title": "reconcile() - compare and apply",
+     "kind": "function",
+     "start": 3961,
+     "end": 3992,
+     "anchor": "states = {}",
+     "summary": "Compares each rendered file with disk, records problems, refuses to overwrite unplanned files and writes updates.",
+     "details": "In check mode any problem raises; otherwise stale or missing files are replaced and the problem list returned."
+    }
+   ]
+  },
+  {
+   "path": "tools/ctlv/ctlvgen/lib/semantics.py",
+   "purpose": "The semantic layer of the generator. It loads a family's inheritance chain via spec.py and resolves it into one immutable effective schema: numeric IDs derived from declaration order, selectors (attrs, groups, sets, stubs) expanded into node trees per op request/reply, stub fills collected, and every cross-declaration rule checked here and not re-checked downstream. The result (Family) feeds sizes.py, compat.py and the code emitters.",
+   "units": [
+    {
+     "title": "Header, constants and _check_count()",
+     "kind": "const",
+     "start": 3999,
+     "end": 4031,
+     "anchor": "# SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause",
+     "summary": "Module docstring, imports, flag and root-enum limits, and the count-limit helper.",
+     "details": "`ROOT_ENUM_VALUES_MAX` caps root enums stored in narrow fields (u8, and 15 for blob-type since `BIT(value)` lives in the blob backings mask). `_check_count` raises CtlvError when a count exceeds its maximum."
+    },
+    {
+     "title": "Definition, Attr, Group, AttrSet",
+     "kind": "struct",
+     "start": 4034,
+     "end": 4081,
+     "anchor": "@dataclasses.dataclass(frozen=True)",
+     "summary": "Effective enum/flags, attr, group and attr set records.",
+     "details": "`Attr.attr_id` is `family_id<<48 | group_id<<32 | local_id`. Enum values start at 1 (0 reserved), flag bits at 0. An unfilled stub stays an AttrSet with `stub=True`."
+    },
+    {
+     "title": "Stub and Fill",
+     "kind": "struct",
+     "start": 4084,
+     "end": 4108,
+     "anchor": "@dataclasses.dataclass(frozen=True)",
+     "summary": "Extension-point reference and the descendant family's fill of it.",
+     "details": "A Stub sits in the declaring family's tree in place of members; a Fill carries the tree (`root`) spliced there, and `owner_family_id` is the filler's ID while `family_id`/`set_id` identify the stub."
+    },
+    {
+     "title": "Node",
+     "kind": "struct",
+     "start": 4111,
+     "end": 4134,
+     "anchor": "@dataclasses.dataclass(frozen=True)",
+     "summary": "One node of an expanded op tree, split into required and optional children.",
+     "details": "The root has `attr=None`. Recursive nests become a node with `expands` naming the set and childless descendants with `reenters`, so tree walks terminate."
+    },
+    {
+     "title": "Message and Op",
+     "kind": "struct",
+     "start": 4137,
+     "end": 4173,
+     "anchor": "@dataclasses.dataclass(frozen=True)",
+     "summary": "A core-built message root and an effective op with its request/reply trees and computed sizes.",
+     "details": "`Message` exists only for the root family's `sizes.CORE_MESSAGES` sets. `Op.op_id` is `family_id<<48 | local_id`; `sizes` is an `OpSizes` from sizes.py."
+    },
+    {
+     "title": "Family",
+     "kind": "struct",
+     "start": 4176,
+     "end": 4237,
+     "anchor": "@dataclasses.dataclass(frozen=True)",
+     "summary": "The fully resolved family: chain, all inherited definitions/groups/attrs/sets/ops, fills and messages.",
+     "details": "Properties read the last chain entry (the target spec). `local_*` views filter to items declared by this family. `fills` is what this family's generator emits; `chain_fills` is all fills a device answers with."
+    },
+    {
+     "title": "InputScope and input_scopes()",
+     "kind": "function",
+     "start": 4240,
+     "end": 4271,
+     "anchor": "@dataclasses.dataclass(frozen=True)",
+     "summary": "Enumerates every schema scope (op request or stub fill, and nested attrs below) that family code may read, each with a unique name tuple.",
+     "details": "Walks only nested attrs. With `owner_family_id` it restricts to that family's own ops and the fills it owns; otherwise the target's local ops and fills."
+    },
+    {
+     "title": "load()",
+     "kind": "function",
+     "start": 4274,
+     "end": 4277,
+     "anchor": "def load(paths):",
+     "summary": "Entry point: loads the registry and resolves the family at `paths.spec`."
+    },
+    {
+     "title": "_Resolver - state and resolve()",
+     "kind": "function",
+     "start": 4280,
+     "end": 4324,
+     "anchor": "class _Resolver:",
+     "summary": "Resolver class state and the top-level resolve sequence.",
+     "details": "Order: load chain, check names and registration order, add each family's declarations, expand every set (`_check_sets`), add ops, compute fills, build the Family, then `_check_composed`. Tables fill incrementally parent first so children can refer to inherited names."
+    },
+    {
+     "title": "_Resolver._messages()",
+     "kind": "function",
+     "start": 4326,
+     "end": 4359,
+     "anchor": "def _messages(self, family):",
+     "summary": "Builds the core message roots from attr sets named in `sizes.CORE_MESSAGES`.",
+     "details": "Only the root family declares them and must; they may not select extension points. `sizes.message_max_len` supplies the maximum length."
+    },
+    {
+     "title": "_Resolver._fills()",
+     "kind": "function",
+     "start": 4361,
+     "end": 4389,
+     "anchor": "def _fills(self, family):",
+     "summary": "Expands each stub fill made by one family (or all, with None) into a Fill tree.",
+     "details": "Fills may select further stubs but not recursive attrs. Tree size is checked."
+    },
+    {
+     "title": "_Resolver._load_chain()",
+     "kind": "function",
+     "start": 4391,
+     "end": 4416,
+     "anchor": "def _load_chain(self):",
+     "summary": "Loads the spec and its ancestors, detecting cycles and mismatched names.",
+     "details": "The file stem must equal the family name. Walks `inherits` upward via `paths.sibling_spec`, prepending each parent, so the chain is root-first."
+    },
+    {
+     "title": "_Resolver chain checks",
+     "kind": "function",
+     "start": 4418,
+     "end": 4461,
+     "anchor": "def _check_root(self, family):",
+     "summary": "Validate root/inheritance rules, name ancestry and registration order.",
+     "details": "Only the root family may inherit nothing. A child name must be `<parent>-<suffix>`. Registry position of a parent must be lower than its child's; `_family_id` resolves the registry position or fails."
+    },
+    {
+     "title": "_Resolver._add_family() and _add_definitions()",
+     "kind": "function",
+     "start": 4463,
+     "end": 4490,
+     "anchor": "def _add_family(self, family):",
+     "summary": "Registers one family's enums, flags, groups and sets, assigning enum and flag numbers.",
+     "details": "Enums are numbered from 1, flags from bit 0. Flags are limited to 64 bits, enums to u32 and root enums to `ROOT_ENUM_VALUES_MAX`. Redeclaring a name is an error."
+    },
+    {
+     "title": "_Resolver._add_groups() and _check_reference()",
+     "kind": "function",
+     "start": 4492,
+     "end": 4532,
+     "anchor": "def _add_groups(self, family, family_id):",
+     "summary": "Assigns group and attr IDs from declaration order and checks enum/flags references.",
+     "details": "Group IDs and attr local IDs start at 1. A group name may not collide with a set. Duplicate attr names and enum/flags refs to unknown or wrong-kind definitions are rejected."
+    },
+    {
+     "title": "_Resolver._add_sets() and _fill_stub()",
+     "kind": "function",
+     "start": 4534,
+     "end": 4574,
+     "anchor": "def _add_sets(self, family, family_id):",
+     "summary": "Registers attr sets, treating a redeclared inherited stub as a fill.",
+     "details": "New sets get the next set ID. A same-named set in a descendant must replace an inherited stub, once; it keeps the declarer's IDs and records its filler in `stub_fillers`."
+    },
+    {
+     "title": "_Resolver._check_sets() and _reject_redeclaration()",
+     "kind": "function",
+     "start": 4576,
+     "end": 4590,
+     "anchor": "def _check_sets(self):",
+     "summary": "Expands every set so even unselected ones are validated; helper for name collisions.",
+     "details": "Seeding the set stack makes cycles read from the set expanded."
+    },
+    {
+     "title": "_Resolver._add_ops()",
+     "kind": "function",
+     "start": 4592,
+     "end": 4622,
+     "anchor": "def _add_ops(self, family):",
+     "summary": "Builds Op records for one family: expands trees, checks context rules and computes sizes.",
+     "details": "IDs use declaration order. Request and reply trees come from `_tree`; `_check_context` validates; `sizes.compute` derives size data."
+    },
+    {
+     "title": "_Resolver._tree() and _expand_placements()",
+     "kind": "function",
+     "start": 4624,
+     "end": 4654,
+     "anchor": "def _tree(self, placements, where):",
+     "summary": "Expand a placements list to a root node and merge selections at one level.",
+     "details": "`_expand_placements` returns child nodes and unfilled stubs. A duplicate selection from different fills is an error; a required selection beats an optional one."
+    },
+    {
+     "title": "_Resolver._expand() and _expand_one()",
+     "kind": "function",
+     "start": 4656,
+     "end": 4696,
+     "anchor": "def _expand(self, selectors, force_optional, where",
+     "summary": "Expand selectors (attr, group, set or stub) into `(attr, required, fill)` triples.",
+     "details": "A dotted name is an attr, otherwise a group or set. Selecting a set recurses with cycle detection via `stack`; an unfilled stub yields a Stub; under an optional selection every member becomes optional; members of a filled set are tagged with the set name."
+    },
+    {
+     "title": "_Resolver._node()",
+     "kind": "function",
+     "start": 4698,
+     "end": 4726,
+     "anchor": "def _node(self, attr, required, where, stack, dept",
+     "summary": "Builds a Node for an attr, recursing into nested attrs.",
+     "details": "Detects nesting cycles and depth beyond `sizes.MAX_DECLARED_NEST_DEPTH`. A recursive nest that points at an already-open set becomes a `reenters` leaf; otherwise it sets `expands`, and must actually re-enter."
+    },
+    {
+     "title": "_Resolver._nested_set() and _attr_by_id()",
+     "kind": "function",
+     "start": 4728,
+     "end": 4752,
+     "anchor": "def _nested_set(self, where, attr):",
+     "summary": "Names the single set a nest holds, when it holds only that.",
+     "details": "Recursive nests must hold exactly one attr set, not a group. `_attr_by_id` is used to name nesting cycles in messages."
+    },
+    {
+     "title": "_Resolver op context checks",
+     "kind": "function",
+     "start": 4754,
+     "end": 4793,
+     "anchor": "def _check_context(self, where, op, request, reply",
+     "summary": "Validates what each op context may contain.",
+     "details": "Unlimited occurrences, re-entry and unbounded depth are only for query replies; blobs only for requests. A query reply cannot both re-enter and select a stub."
+    },
+    {
+     "title": "Tree predicate helpers",
+     "kind": "function",
+     "start": 4796,
+     "end": 4809,
+     "anchor": "def _reenters(node, name):",
+     "summary": "Recursive tree queries for re-entry and stubs."
+    },
+    {
+     "title": "_composed_members() and _check_composed()",
+     "kind": "function",
+     "start": 4812,
+     "end": 4860,
+     "anchor": "def _composed_members(fills, node, force_optional=",
+     "summary": "Checks the schema as composed with every fill in the chain.",
+     "details": "`_composed_members` flattens a node's children plus the members of fills at its stubs. `_check_composed` rejects duplicate attrs and over-large counts across request and reply."
+    },
+    {
+     "title": "Tree size and construction helpers",
+     "kind": "function",
+     "start": 4863,
+     "end": 4891,
+     "anchor": "def _node_count(node):",
+     "summary": "Count nodes and stubs, check tree size, build a root node, and merge stub references.",
+     "details": "`_merge_stubs` keeps one reference per stub name, required winning over optional."
+    }
+   ]
+  },
+  {
+   "path": "tools/ctlv/ctlvgen/lib/sizes.py",
+   "purpose": "Length arithmetic over expanded op trees, producing the generated per-op lengths and enforcing transport limits. Used by `semantics.py` and the generators.",
+   "units": [
+    {
+     "title": "Header and wire constants",
+     "kind": "const",
+     "start": 4898,
+     "end": 4944,
+     "anchor": "# SPDX-License-Identifier",
+     "summary": "Docstring, imports and the length constants that mirror include/uapi/linux/ctlv.h.",
+     "details": "Header lengths, message and queue limits, nest depth (declared depth is one less than transport depth), scalar and bool payload sizes, blob descriptor attr counts per backing, and the core messages with their own limits."
+    },
+    {
+     "title": "OpSizes",
+     "kind": "struct",
+     "start": 4946,
+     "end": 4954,
+     "anchor": "@dataclasses.dataclass",
+     "summary": "Generated lengths of one op; zero means not applicable."
+    },
+    {
+     "title": "Basic length helpers",
+     "kind": "function",
+     "start": 4957,
+     "end": 4978,
+     "anchor": "def align(length)",
+     "summary": "`align()` rounds up to 8; `attr_max_len()`, `root_max_len()` and `min_reply_len()` give maximum or minimum lengths of a tree node.",
+     "details": "`min_reply_len()` is the buffer needed for the largest unsplittable leaf plus its path headers; if the tree re-enters, the path is assumed as deep as the transport allows."
+    },
+    {
+     "title": "compute()",
+     "kind": "function",
+     "start": 4981,
+     "end": 5011,
+     "anchor": "def compute(where",
+     "summary": "Returns the `OpSizes` of one op from its expanded request/reply roots, checking the inline message limit.",
+     "details": "Action replies, query minimum and suggested lengths, and event record size (header plus aligned payload) are filled according to op type."
+    },
+    {
+     "title": "composed()",
+     "kind": "function",
+     "start": 5014,
+     "end": 5045,
+     "anchor": "def composed(where",
+     "summary": "Recomputes an op's lengths over the composed tree with fills spliced in.",
+     "details": "Same as `compute()` except a query's suggested length is raised to the new minimum, and event records are checked against the event queue limit."
+    },
+    {
+     "title": "message_max_len()",
+     "kind": "function",
+     "start": 5048,
+     "end": 5055,
+     "anchor": "def message_max_len(",
+     "summary": "Computes a core message's maximum length and checks it against its named limit in `CORE_MESSAGES`."
+    },
+    {
+     "title": "_payload_max_len()",
+     "kind": "function",
+     "start": 5058,
+     "end": 5076,
+     "anchor": "def _payload_max_len(",
+     "summary": "Maximum payload bytes of a node by attr kind.",
+     "details": "Scalars are 8, bool 1, string max_length+1 for the NUL, binary max_length, blob the widest backing's descriptor attrs; nests and roots sum children."
+    },
+    {
+     "title": "_children_max_len()",
+     "kind": "function",
+     "start": 5079,
+     "end": 5091,
+     "anchor": "def _children_max_len(",
+     "summary": "Sums occurrences times aligned attr length over children, asserting there is a finite bound.",
+     "details": "Unlimited occurrences or re-entering children would have no maximum, so those raise AssertionError (callers must avoid them)."
+    },
+    {
+     "title": "Minimum-length walkers",
+     "kind": "function",
+     "start": 5094,
+     "end": 5115,
+     "anchor": "def _min_walk(",
+     "summary": "`_min_walk()`, `_reenters()` and `_largest_leaf()` support `min_reply_len()`.",
+     "details": "The walk takes the largest leaf placement plus its ancestors' headers; `_largest_leaf()` is used when the tree re-enters."
+    },
+    {
+     "title": "_check_inline() and _suggested_len()",
+     "kind": "function",
+     "start": 5118,
+     "end": 5135,
+     "anchor": "def _check_inline(",
+     "summary": "Enforce the inline message limit and resolve a query's suggested reply length.",
+     "details": "The default is `DEFAULT_QUERY_REPLY_LEN` raised to the minimum; a declared value must lie between the minimum and the inline limit."
+    }
+   ]
+  },
+  {
+   "path": "tools/ctlv/ctlvgen/lib/spec.py",
+   "purpose": "The syntax layer: loads a family or registry YAML, validates it against the meta-schema and normalizes it into frozen dataclasses. Called by `semantics.py` and `outputs.py`; cross-declaration rules live in `semantics.py`.",
+   "units": [
+    {
+     "title": "Header, constants and accessory-key table",
+     "kind": "const",
+     "start": 5142,
+     "end": 5207,
+     "anchor": "# SPDX-License-Identifier",
+     "summary": "Module docstring, imports, and the numeric limits, kind tuples and per-kind accessory keys that the syntax rules use.",
+     "details": "- `LICENSE` extracts the SPDX id from a spec's first line.\n- `_ACCESSORY_KEYS` maps each resolved attr kind to the keys allowed beyond the primary key and `_COMMON_KEYS`; `_reject_unusable_keys()` consults it.\n- `UNLIMITED = 0` is the wire encoding of unlimited occurrences."
+    },
+    {
+     "title": "ValueList and BlobDecl",
+     "kind": "struct",
+     "start": 5210,
+     "end": 5226,
+     "anchor": "@dataclasses.dataclass",
+     "summary": "Frozen records for an enum/flags definition and for the blob properties of one attr.",
+     "details": "Produced by `_value_lists()` and `_blob()`; consumed by `semantics.py` and the generators."
+    },
+    {
+     "title": "AttrDecl",
+     "kind": "struct",
+     "start": 5228,
+     "end": 5249,
+     "anchor": "@dataclasses.dataclass",
+     "summary": "Normalized form of one attr declaration, with fields that do not apply to its kind left as None.",
+     "details": "`kind` is the resolved primary form (`uint`, `sint`, `bool`, `string`, `binary`, `enum`, `flags`, `nested`, `blob`). `ref`, `attrs`, `optional_attrs`, `blob` and the bound fields are filled only for the kinds that use them. `sizes.py` reads `max_length` and `blob`."
+    },
+    {
+     "title": "AttrGroupSpec, AttrSetSpec, Placements",
+     "kind": "struct",
+     "start": 5252,
+     "end": 5271,
+     "anchor": "@dataclasses.dataclass",
+     "summary": "Records for an attr group, an attr set (possibly a stub) and the selectors placed at one level of a message.",
+     "details": "Selectors are strings naming attrs (`group.attr`) or, for a recursive nest, an attr set; they are resolved later by `semantics.py`."
+    },
+    {
+     "title": "OpSpec",
+     "kind": "struct",
+     "start": 5274,
+     "end": 5284,
+     "anchor": "@dataclasses.dataclass",
+     "summary": "One op as written: type, request and reply placements, and normalized flags.",
+     "details": "`request` is None for events; `reply` is None for an action that declares none (ACK only). See `_ops()`."
+    },
+    {
+     "title": "FamilySpec",
+     "kind": "struct",
+     "start": 5287,
+     "end": 5302,
+     "anchor": "@dataclasses.dataclass",
+     "summary": "One syntax-checked, normalized specification file.",
+     "details": "Carries the SPDX license of the file, the parent family name (`inherits`) and the pre/post hook flags. Returned by `load()`; `semantics.load()` builds on it."
+    },
+    {
+     "title": "RegistryEntry and Registry",
+     "kind": "struct",
+     "start": 5305,
+     "end": 5327,
+     "anchor": "@dataclasses.dataclass",
+     "summary": "The append-only family registry, where the list index is the family ID.",
+     "details": "`Registry.family_id()` returns the index of a name or None; `license` re-reads the registry file's first line."
+    },
+    {
+     "title": "Paths",
+     "kind": "struct",
+     "start": 5330,
+     "end": 5361,
+     "anchor": "class Paths",
+     "summary": "Derives every on-disk location (specs, registry, meta-schemas, ABI snapshots, manifest) from the spec path and optional overrides.",
+     "details": "- `sibling_spec()` sends the root family `ctlv` to the directory of the meta-schema, so fixture corpora inherit the real root.\n- `abi()` names a family's checked-in ABI snapshot.\n- `kernel_dir` is the tree root, used by `outputs.py` for repository-relative paths."
+    },
+    {
+     "title": "load_registry()",
+     "kind": "function",
+     "start": 5364,
+     "end": 5395,
+     "anchor": "def load_registry(",
+     "summary": "Loads the registry YAML, validates it against its meta-schema and enforces the ID rules.",
+     "details": "Checks names (length, duplicates), that the core family is entry 0 and not deprecated, and that the entry count fits `MAX_FAMILY_ID`. A bare string entry means not deprecated. Callers: `outputs.load()` and the CLI."
+    },
+    {
+     "title": "load()",
+     "kind": "function",
+     "start": 5398,
+     "end": 5422,
+     "anchor": "def load(path, schema=None)",
+     "summary": "Loads one family spec, validates syntax and builds a normalized `FamilySpec`.",
+     "details": "Delegates each top-level section to `_value_lists()`, `_groups()`, `_sets()` and `_ops()`; omitted hook flags default to False. Cross-declaration checks are left to `semantics.load()`."
+    },
+    {
+     "title": "_license() and _validate_syntax()",
+     "kind": "function",
+     "start": 5425,
+     "end": 5443,
+     "anchor": "def _license(path)",
+     "summary": "Read the SPDX id from the first line, and check parsed YAML against a JSON-Schema meta-schema.",
+     "details": "`_validate_syntax()` reports only the best-matching jsonschema error, prefixed with the JSON path when it is not at the root. `outputs.load()` also calls it for the manifest."
+    },
+    {
+     "title": "_family_name()",
+     "kind": "function",
+     "start": 5446,
+     "end": 5450,
+     "anchor": "def _family_name(",
+     "summary": "Enforces the maximum family-name length."
+    },
+    {
+     "title": "_value_lists() and _groups()",
+     "kind": "function",
+     "start": 5453,
+     "end": 5477,
+     "anchor": "def _value_lists(",
+     "summary": "Build enum/flags lists (rejecting duplicate values) and attr groups (running `_attr()` on each member).",
+     "details": "Error locations are formatted as `path: attr group.attr` for diagnostics."
+    },
+    {
+     "title": "_attr()",
+     "kind": "function",
+     "start": 5480,
+     "end": 5507,
+     "anchor": "def _attr(where, raw)",
+     "summary": "Normalizes one attr declaration by resolving its primary key, rejecting unusable keys and dispatching on kind.",
+     "details": "Each kind has its own normalizer: integer bounds, string or binary lengths, enum/flags ref, nested selectors (with the recursive check) or blob."
+    },
+    {
+     "title": "_check_recursive()",
+     "kind": "function",
+     "start": 5510,
+     "end": 5520,
+     "anchor": "def _check_recursive(",
+     "summary": "A recursive nest must name exactly one attr set and declare no optional-attrs.",
+     "details": "The named set carries its own optional members; a dotted name would refer to a single attr, not a set."
+    },
+    {
+     "title": "_primary_key(), _kind(), _reject_unusable_keys()",
+     "kind": "function",
+     "start": 5523,
+     "end": 5547,
+     "anchor": "def _primary_key(",
+     "summary": "Pick the one primary key of an attr, map it to a kind, and reject keys that kind does not allow.",
+     "details": "`attrs` as a primary key means a nested attr; `type` carries the scalar kind name. Allowed keys come from `_COMMON_KEYS`, the primary and `_ACCESSORY_KEYS[kind]`."
+    },
+    {
+     "title": "_max_occurrences()",
+     "kind": "function",
+     "start": 5550,
+     "end": 5557,
+     "anchor": "def _max_occurrences(",
+     "summary": "Normalizes max-occurrences: 'unlimited' becomes 0, otherwise a value in 1..u32 max."
+    },
+    {
+     "title": "_integer_bounds()",
+     "kind": "function",
+     "start": 5560,
+     "end": 5580,
+     "anchor": "def _integer_bounds(",
+     "summary": "Fills min/max defaults from the 64-bit range of the kind and validates them, along with unit and scale.",
+     "details": "scale needs unit, and an attr with unit and no scale gets scale 0; scale is limited to s8."
+    },
+    {
+     "title": "_u32_value(), _string_lengths(), _binary_lengths()",
+     "kind": "function",
+     "start": 5583,
+     "end": 5614,
+     "anchor": "def _u32_value(",
+     "summary": "Validate length keys as u32 and normalize string and binary length bounds to min_length/max_length.",
+     "details": "A string requires max-length. A binary takes either a fixed `length` (min = max) or max-length with optional min-length; the two forms cannot be mixed."
+    },
+    {
+     "title": "_blob()",
+     "kind": "function",
+     "start": 5617,
+     "end": 5635,
+     "anchor": "def _blob(",
+     "summary": "Validates blob max-length and alignment and builds a `BlobDecl`.",
+     "details": "Alignment must be a power of two within u32 and max-length a multiple of it."
+    },
+    {
+     "title": "_sets()",
+     "kind": "function",
+     "start": 5638,
+     "end": 5652,
+     "anchor": "def _sets(",
+     "summary": "Builds attr sets, requiring members unless the set is a stub extension point, and forbidding members on a stub."
+    },
+    {
+     "title": "_ops() - per-type validation",
+     "kind": "function",
+     "start": 5655,
+     "end": 5687,
+     "anchor": "def _ops(path, raw_ops)",
+     "summary": "Starts building each op and rejects keys that do not suit its type.",
+     "details": "Events cannot declare a request, fd-access, availability, optional or pre-post; queries must declare a reply; suggested-reply-length is for queries only."
+    },
+    {
+     "title": "_ops() - placements and OpSpec",
+     "kind": "function",
+     "start": 5688,
+     "end": 5709,
+     "anchor": "# An omitted action or query request",
+     "summary": "Normalizes request and reply placements and emits the `OpSpec`.",
+     "details": "Events have no request. An omitted event reply becomes empty `Placements`; an omitted action reply stays None (ACK only). Defaults come from `DEFAULT_FD_ACCESS` and `DEFAULT_AVAILABILITY`."
+    },
+    {
+     "title": "_placements() and _selectors()",
+     "kind": "function",
+     "start": 5712,
+     "end": 5724,
+     "anchor": "def _placements(raw)",
+     "summary": "Normalize an optional placements mapping and a selector (None, string or list) into tuples."
+    }
+   ]
+  },
+  {
+   "path": "tools/ctlv/ctlvgen/lib/tree.py",
+   "purpose": "Whole-tree consistency checks: that the registry, the specification files, the ABI snapshots and the output manifest agree. Called from cli.py for the tree-*/outputs-* actions; sits above spec, compat and outputs.",
+   "units": [
+    {
+     "title": "Imports and _stems()",
+     "kind": "section",
+     "start": 5731,
+     "end": 5745,
+     "anchor": "# SPDX-License-Identifier",
+     "summary": "Imports plus a helper returning the file stems of *.yaml in a directory, minus excluded names."
+    },
+    {
+     "title": "coverage_problems()",
+     "kind": "function",
+     "start": 5747,
+     "end": 5766,
+     "anchor": "def coverage_problems(",
+     "summary": "Compares registry names against spec files and ABI snapshots, returning a list of problem strings.",
+     "details": "Reports missing and unexpected specifications and snapshots. The registry's own baseline file is excluded from the snapshot set, and `allowed_missing_snapshots` tolerates names newly appended to the registry."
+    },
+    {
+     "title": "check()",
+     "kind": "function",
+     "start": 5769,
+     "end": 5777,
+     "anchor": "def check(paths):",
+     "summary": "Full check: loads the registry, verifies it against its baseline, checks coverage and loads the output manifest.",
+     "details": "Used by --tree-check and --outputs-check. Raises CtlvError('CTLV tree', ...) listing every problem."
+    },
+    {
+     "title": "check_for_update() and finish_update()",
+     "kind": "function",
+     "start": 5780,
+     "end": 5801,
+     "anchor": "def check_for_update(",
+     "summary": "Two-phase registry update: first validate while allowing snapshots for newly appended families to be missing, then require complete snapshots before the baseline advances.",
+     "details": "check_for_update() uses compat.registry_check(exact=False) and treats entries beyond the baseline as appended. finish_update() is called by --registry-abi-update. --outputs-update also runs check_for_update() first."
+    }
+   ]
+  },
+  {
+   "path": "tools/ctlv/ctlvgen/lib/yamlload.py",
+   "purpose": "Strict YAML loader used for every input file (specs, registry, snapshots, manifests), so that all consumers of an ABI-defining file agree on what it says. Used by spec, compat and outputs.",
+   "units": [
+    {
+     "title": "Docstring, imports and _mark()",
+     "kind": "section",
+     "start": 5808,
+     "end": 5825,
+     "anchor": "# SPDX-License-Identifier",
+     "summary": "States the policy (no anchors, aliases, merge keys, explicit tags, duplicate keys or multiple documents) and formats file:line locations."
+    },
+    {
+     "title": "_StrictLoader",
+     "kind": "struct",
+     "start": 5827,
+     "end": 5858,
+     "anchor": "class _StrictLoader",
+     "summary": "A yaml.SafeLoader subclass that raises CtlvError on ambiguous constructs.",
+     "details": "compose_node() rejects aliases, anchors and explicit tags as they are parsed; construct_mapping() rejects merge keys and duplicate keys. Errors carry the file path and 1-based line."
+    },
+    {
+     "title": "_has_explicit_tag()",
+     "kind": "function",
+     "start": 5861,
+     "end": 5867,
+     "anchor": "def _has_explicit_tag(",
+     "summary": "Distinguishes an explicit tag from an implicitly resolved one using the event's `implicit` flag."
+    },
+    {
+     "title": "load()",
+     "kind": "function",
+     "start": 5870,
+     "end": 5890,
+     "anchor": "def load(path):",
+     "summary": "Parses a single document with the strict loader and returns it as plain Python objects.",
+     "details": "OS and YAML errors become CtlvError; the top level must be a mapping. The loader is disposed in a finally block."
+    }
+   ]
+  },
+  {
+   "path": "tools/ctlv/pyproject.toml",
+   "purpose": "Packaging metadata so ctlvgen can be installed with setuptools and exposed as a console script.",
+   "units": [
+    {
+     "title": "Project metadata",
+     "kind": "config",
+     "start": 5897,
+     "end": 5918,
+     "anchor": "[build-system]",
+     "summary": "Declares the ctlvgen project (Python >= 3.9, pyyaml 6.x and jsonschema 4.x), packages ctlvgen and ctlvgen.lib, and the `ctlvgen` script entry pointing at ctlvgen.cli:main."
+    }
+   ]
+  },
+  {
+   "path": "tools/ctlv/requirements.txt",
+   "purpose": "Pins the runtime dependencies for pip installs, matching pyproject.toml.",
+   "units": [
+    {
+     "title": "Runtime dependencies",
+     "kind": "config",
+     "start": 5925,
+     "end": 5926,
+     "anchor": "pyyaml==6.*",
+     "summary": "pyyaml 6.x (used by yamlload) and jsonschema 4.x (used by spec for meta-schema validation)."
+    }
+   ]
+  }
+ ]
+}

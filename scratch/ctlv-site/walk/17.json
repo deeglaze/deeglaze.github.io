@@ -1,0 +1,254 @@
+{
+ "patch": 17,
+ "title": "attestation: Add CTLV operation handling",
+ "overview": "This patch adds the translation layer between the generated CTLV attestation family (patch 14) and the provider/MR-journal core (patches 15-16): core/ctlv.c implements the per-operation handlers named by the family's op table. It also exports the op pre/post hooks, builds the generated family object into the attestation module, and wires drivers/attestation into the top-level Kconfig and Makefile so the whole subsystem is finally compiled.",
+ "files": [
+  {
+   "path": "Documentation/driver-api/attestation.rst",
+   "purpose": "Driver-API documentation for the attestation core; this patch adds a note on how MR_READ uses generations.",
+   "units": [
+    {
+     "title": "MR_READ generation semantics",
+     "kind": "doc",
+     "start": 30,
+     "end": 33,
+     "anchor": "``MR_READ`` uses",
+     "summary": "Documents that the continuation check uses mr_read_generation while the reply carries the journal boundary at which values were read.",
+     "details": "Matches `ctlv_attestation_mr_read_query()` below: the cursor generation is compared with `att->mr_read_generation`, but the reply's `mr.generation` is `att->log->generation`."
+    }
+   ]
+  },
+  {
+   "path": "drivers/Kconfig",
+   "purpose": "Top-level driver Kconfig menu; includes each subsystem's Kconfig.",
+   "units": [
+    {
+     "title": "Source the attestation Kconfig",
+     "kind": "config",
+     "start": 45,
+     "end": 46,
+     "anchor": "source \"drivers/attestation/Kconfig\"",
+     "summary": "Makes the ATTESTATION option visible, right after the CTLV option it depends on."
+    }
+   ]
+  },
+  {
+   "path": "drivers/Makefile",
+   "purpose": "Top-level driver build ordering.",
+   "units": [
+    {
+     "title": "Descend into drivers/attestation",
+     "kind": "build",
+     "start": 58,
+     "end": 58,
+     "anchor": "obj-$(CONFIG_ATTESTATION)",
+     "summary": "Builds the attestation subsystem when CONFIG_ATTESTATION is set, placed after ctlv/."
+    }
+   ]
+  },
+  {
+   "path": "drivers/attestation/Makefile",
+   "purpose": "Module build rules for the attestation core.",
+   "units": [
+    {
+     "title": "Add ctlv.o and the generated family object",
+     "kind": "build",
+     "start": 70,
+     "end": 72,
+     "anchor": "attestation-y :=",
+     "summary": "Links core/ctlv.o and generated/ctlv_attestation_gen.o into attestation.o alongside core, events and mr.",
+     "details": "The generated object supplies the family descriptor, cursor helpers and op table that reference the handlers defined in ctlv.c."
+    }
+   ]
+  },
+  {
+   "path": "drivers/attestation/core/core.c",
+   "purpose": "Provider/instance core; owns struct attestation and the per-instance lock.",
+   "units": [
+    {
+     "title": "Export ctlv_attestation_op_pre()",
+     "kind": "macro",
+     "start": 81,
+     "end": 81,
+     "anchor": "EXPORT_SYMBOL_NS_GPL(ctlv_attestation_op_pre",
+     "summary": "Exports the pre-operation hook (which takes att->lock) in the ATTESTATION namespace.",
+     "details": "Per-instance locking for CTLV ops is therefore available to the generated family code and to other modules such as the TDX family."
+    },
+    {
+     "title": "Export ctlv_attestation_op_post()",
+     "kind": "macro",
+     "start": 89,
+     "end": 89,
+     "anchor": "EXPORT_SYMBOL_NS_GPL(ctlv_attestation_op_post",
+     "summary": "Exports the matching post-operation hook that unlocks att->lock."
+    }
+   ]
+  },
+  {
+   "path": "drivers/attestation/core/ctlv.c",
+   "purpose": "CTLV operation handlers for the attestation family: each ctlv_attestation_*_action/query function decodes a request cursor, calls into the provider or the MR journal (mr.c, events), and encodes the reply. They are invoked by the generated op table under att->lock (taken by ctlv_attestation_op_pre); the cursor accessors named ctlv_attestation_* come from generated/ctlv_attestation_gen.h.",
+   "units": [
+    {
+     "title": "Header and includes",
+     "kind": "section",
+     "start": 99,
+     "end": 108,
+     "anchor": "SPDX-License-Identifier",
+     "summary": "License line and includes, including the private internal.h with struct attestation and MR helpers."
+    },
+    {
+     "title": "attestation_evidence_object_find()",
+     "kind": "function",
+     "start": 110,
+     "end": 122,
+     "anchor": "static const struct attestation_evidence_supported_object",
+     "summary": "Looks up a provider-supported evidence object by its format string.",
+     "details": "Linear scan of `caps->objects`; returns the matching `attestation_evidence_supported_object` or NULL. Used when decoding evidence requests."
+    },
+    {
+     "title": "attestation_device_caps_put()",
+     "kind": "function",
+     "start": 124,
+     "end": 176,
+     "anchor": "static int attestation_device_caps_put(",
+     "summary": "Encodes the device capabilities nest: evidence limits and objects, and MR read/extend flags.",
+     "details": "- Evidence section is emitted only if `provider->evidence_caps` is set; one object nest per supported format, blob class PRIMARY and representation RAW.\n- MR section is emitted only if `provider->mrs_count` is non-zero; flags derive from whether `mr_read` / `mr_extend` callbacks exist.\n- Failures to put attributes are accumulated in `ok` and reported as -EMSGSIZE at the end so nests are always closed."
+    },
+    {
+     "title": "ctlv_attestation_device_get_action()",
+     "kind": "function",
+     "start": 178,
+     "end": 193,
+     "anchor": "int ctlv_attestation_device_get_action(",
+     "summary": "Handler for the device GET op: caps nest followed by the generic device info nest.",
+     "details": "The info nest is filled by `ctlv_stub_fill()` from the CTLV core's introspection support."
+    },
+    {
+     "title": "attestation_evidence_decode_objects() - resolve output blobs",
+     "kind": "function",
+     "start": 195,
+     "end": 229,
+     "anchor": "static int",
+     "summary": "First phase: count the requested objects, allocate the array, and for each map format to a supported object and resolve its output blob.",
+     "details": "- Rejects unknown formats (-EOPNOTSUPP) and duplicate formats (-EINVAL).\n- `..._evidence_data_resolve()` yields a blob reference (VA blob, patch 9) that must be released with `ctlv_blob_put()`.\n- On errors the earlier-resolved blobs are put and the array freed."
+    },
+    {
+     "title": "attestation_evidence_decode_objects() - size checks and publish",
+     "kind": "function",
+     "start": 230,
+     "end": 261,
+     "anchor": "if (IS_ERR(objects[index].output))",
+     "summary": "Second phase: validate blob capacity against the format's max_length and the running total against max_total_output_length, then hand the array to the caller.",
+     "details": "Each output blob must be at least `supported->max_length` bytes; the sum of blob lengths is checked with `check_add_overflow` against the caps' total limit (-E2BIG). On success the array is returned through `decoded->objects` and `*objects_out`."
+    },
+    {
+     "title": "attestation_evidence_request_decode() and _free()",
+     "kind": "function",
+     "start": 263,
+     "end": 289,
+     "anchor": "static int attestation_evidence_request_decode(",
+     "summary": "Decodes the challenge (with length bounds from the caps) then the objects; the free helper puts every non-NULL output blob and frees the array.",
+     "details": "`attestation_evidence_request_free()` tolerates entries whose `output` was already put and cleared by the action handler."
+    },
+    {
+     "title": "ctlv_attestation_evidence_get_action() - decode and call provider",
+     "kind": "function",
+     "start": 291,
+     "end": 325,
+     "anchor": "int ctlv_attestation_evidence_get_action(",
+     "summary": "Handler for the evidence GET op: decode the request, call provider->evidence_get(), and check the reported lengths.",
+     "details": "- `mr_dependent` is true if any requested object has `binds_mrs`, meaning its content depends on measurement register state.\n- The provider fills `result.object_lengths`; each must fit both the format's `max_length` and the resolved blob."
+    },
+    {
+     "title": "ctlv_attestation_evidence_get_action() - release blobs and reply",
+     "kind": "function",
+     "start": 326,
+     "end": 348,
+     "anchor": "for (index = 0; index < decoded.objects_count; index++) {",
+     "summary": "Puts the output blobs (surfacing any put error), then writes the MR generation (if MR-bound) and per-object lengths into the reply.",
+     "details": "`att->log->generation` is the journal boundary the evidence reflects; the lock held by the op hooks keeps it stable during the call. The `out:` label frees the length array and any remaining blobs."
+    },
+    {
+     "title": "ctlv_attestation_mr_get_action()",
+     "kind": "function",
+     "start": 350,
+     "end": 361,
+     "anchor": "int ctlv_attestation_mr_get_action(",
+     "summary": "Handler for MR GET: look up one live MR by id and encode its properties.",
+     "details": "Ids beyond UINT_MAX give -ERANGE; `attestation_mr_lookup_live()` (mr.c) returns an ERR_PTR for unknown or removed MRs; encoding is shared via `attestation_mr_props_encode()`."
+    },
+    {
+     "title": "ctlv_attestation_mr_dump_query()",
+     "kind": "function",
+     "start": 363,
+     "end": 388,
+     "anchor": "int ctlv_attestation_mr_dump_query(",
+     "summary": "Paginated dump of all MRs from the att->mrs xarray, resumable across query rounds.",
+     "details": "- The CTLV query cursor stores the next xarray index plus one; the query generation stores the journal generation, and a mismatch yields -ESTALE.\n- When an item no longer fits, `ctlv_op_query_more()` returns the cursor to resume at; otherwise `ctlv_op_query_done()`."
+    },
+    {
+     "title": "attestation_mr_values_put()",
+     "kind": "function",
+     "start": 390,
+     "end": 411,
+     "anchor": "static int attestation_mr_values_put(",
+     "summary": "Encodes a digest set as repeated MR value nests (hash algorithm plus digest bytes).",
+     "details": "Digest length comes from `hash_digest_size[algorithm]`; any failed put turns into -EMSGSIZE."
+    },
+    {
+     "title": "ctlv_attestation_mr_read_query()",
+     "kind": "function",
+     "start": 413,
+     "end": 450,
+     "anchor": "int ctlv_attestation_mr_read_query(",
+     "summary": "Handler for MR READ: reads the current digests of one readable MR via the provider and returns them with the journal generation.",
+     "details": "- On continuation the query generation must equal `att->mr_read_generation`, else -ESTALE.\n- Requires `props->readable`; allocates one digest slot per supported algorithm, calls `provider->mr_read()`, then `attestation_mr_values_validate()`.\n- Replies with `att->log->generation` and the values, then completes the query with `ctlv_op_query_done()`."
+    },
+    {
+     "title": "attestation_digest_compare() and attestation_mr_extend_decode()",
+     "kind": "function",
+     "start": 452,
+     "end": 491,
+     "anchor": "static int attestation_digest_compare(",
+     "summary": "Decodes the repeated MR value attributes of an extend request into a digest set sorted by algorithm.",
+     "details": "Each value must name a known hash algorithm and carry exactly `hash_digest_size[algorithm]` bytes. Sorting by algorithm id gives a canonical order for validation against the MR's algorithm list and for the journal entry."
+    },
+    {
+     "title": "ctlv_attestation_mr_extend_action()",
+     "kind": "function",
+     "start": 493,
+     "end": 532,
+     "anchor": "int ctlv_attestation_mr_extend_action(",
+     "summary": "Handler for MR EXTEND: validate, prepare a change, extend through the journal, and report the resulting generation.",
+     "details": "- Requires a live MR with `props->extendable`.\n- Pipeline: decode values, `attestation_mr_values_validate()`, `attestation_mr_change_prepare()` (allocations), then `attestation_mr_extend_locked()`, which calls the provider's `mr_extend` and publishes the log entry (see the journal documentation).\n- The reply carries `entry->mr_generation`; the prepared change and decoded values are freed on all paths."
+    },
+    {
+     "title": "attestation_log_selected()",
+     "kind": "function",
+     "start": 534,
+     "end": 544,
+     "anchor": "static bool attestation_log_selected(",
+     "summary": "Filter predicate: an entry is selected if no MR ids were requested or its id is in the list."
+    },
+    {
+     "title": "ctlv_attestation_mr_log_get_query() - request parsing and range",
+     "kind": "function",
+     "start": 546,
+     "end": 597,
+     "anchor": "int ctlv_attestation_mr_log_get_query(",
+     "summary": "First part of the journal query: collect the MR selection, pick the snapshot boundary, and compute the [start, end] generation range.",
+     "details": "- Up to 256 distinct MR ids; duplicates give -EINVAL.\n- On the first round the boundary is the current `att->log->generation`; on continuation it is the generation saved in the query state (-ESTALE if it is beyond the log).\n- Optional start/end generations narrow the range; the first reply echoes the effective start and end."
+    },
+    {
+     "title": "ctlv_attestation_mr_log_get_query() - iteration",
+     "kind": "function",
+     "start": 598,
+     "end": 618,
+     "anchor": "xa_index = cursor ? cursor : start;",
+     "summary": "Walks the entries xarray, skipping unselected MRs, and returns one entry per round via the query cursor.",
+     "details": "The first round (cursor 0) only positions the cursor with `ctlv_op_query_more()` at the first matching entry's generation. Later rounds encode that entry, look ahead for the next match, and either request more or finish with `ctlv_op_query_done()`, keeping the boundary constant so results come from one snapshot."
+    }
+   ]
+  }
+ ]
+}

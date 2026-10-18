@@ -1,0 +1,897 @@
+Hi Jiri,
+
+A few review comments on this patch inline below.
+
+> From 88d3df2eb185ae07c628038a6770eaeb1363d5e2 Mon Sep 17 00:00:00 2001
+> From: Jiri Pirko <jiri@nvidia.com>
+> Date: Thu, 15 Oct 2026 16:50:49 +0200
+> Subject: [PATCH 16/20] attestation: Prepare measurement register journal
+>
+> Add static MR state, append-only INFO and EXTEND records, and journal
+
+Series ordering: the entire journal (`mr_change_prepare`, `mr_extend_locked`, `mr_change_free`, event emit, props/entry encode, `lookup_live`, `values_validate`) has no caller until 0017, and the commit message admits the module is still unwired. Nothing here can be exercised or even compiled by the build system. These are non-static functions so `-Wunused` is silent, but it makes the patch un-reviewable in isolation (is the locking contract right? only visible in `ctlv.c`). Please fold it into the handler patch or wire Kconfig.
+
+> notifications.
+>
+> The journal objects can be compile-checked here. CONFIG_ATTESTATION remains
+> unwired until the CTLV operation handlers complete the module.
+>
+> Assisted-by: Cursor: GPT-5.6 Sol
+> Assisted-by: Cursor: Claude Opus 5.5
+> Signed-off-by: Jiri Pirko <jiri@nvidia.com>
+> ---
+>  Documentation/driver-api/attestation.rst |   8 +
+>  drivers/attestation/Makefile             |   2 +-
+>  drivers/attestation/core/core.c          |  76 ++++-
+>  drivers/attestation/core/events.c        |  65 ++++
+>  drivers/attestation/core/internal.h      |  79 ++++-
+>  drivers/attestation/core/mr.c            | 376 +++++++++++++++++++++++
+>  6 files changed, 600 insertions(+), 6 deletions(-)
+>  create mode 100644 drivers/attestation/core/events.c
+>  create mode 100644 drivers/attestation/core/mr.c
+>
+> diff --git a/Documentation/driver-api/attestation.rst b/Documentation/driver-api/attestation.rst
+> index 6d0cf9095c66..3cddd853aaa0 100644
+> --- a/Documentation/driver-api/attestation.rst
+> +++ b/Documentation/driver-api/attestation.rst
+> @@ -27,6 +27,14 @@ callback, journal commit and event emission with one instance mutex.
+>  Fixed MRs are listed in the provider descriptor.  Their property storage
+>  remains valid until ``ctlv_destroy()`` or failed-creation unwind completes.
+>  
+> +MR journal
+> +==========
+> +
+> +MR extension is transactional.  The core allocates the complete journal entry
+
+Inaccurate: "A successful callback is followed only by infallible publication". Publication is not infallible: `attestation_mr_log_event_emit()` can fail on nested-start/encode (`-EMSGSIZE`) and `ctlv_event_emit()` returns errors; in both cases the code only `pr_err()`s and the event is dropped, so userspace "observes the same ordered journal" only if it dumps the log. Either document that events are best-effort (and that `ctlv_event_lost()` semantics apply) or make the event encoding genuinely infallible. Also `xa_reserve()` is `GFP_KERNEL` and held across the provider callback - say so.
+
+> +and event before invoking ``mr_extend``.  A successful callback is followed
+> +only by infallible publication, so userspace observes the same ordered
+> +journal.
+> +
+>  Teardown
+>  ========
+>  
+> diff --git a/drivers/attestation/Makefile b/drivers/attestation/Makefile
+> index 8a75558a7013..e7c9cb2dfec0 100644
+> --- a/drivers/attestation/Makefile
+> +++ b/drivers/attestation/Makefile
+> @@ -1,4 +1,4 @@
+>  # SPDX-License-Identifier: GPL-2.0
+>  obj-$(CONFIG_ATTESTATION) += attestation.o
+>  
+> -attestation-y := core/core.o
+> +attestation-y := core/core.o core/events.o core/mr.o
+> diff --git a/drivers/attestation/core/core.c b/drivers/attestation/core/core.c
+> index e112d3a0ff2b..6db8ed093e93 100644
+> --- a/drivers/attestation/core/core.c
+> +++ b/drivers/attestation/core/core.c
+> @@ -157,6 +157,13 @@ bool attestation_registered(struct attestation *att)
+>  	return registered;
+>  }
+>  
+> +void attestation_mr_changed(struct attestation *att)
+
+`attestation_mr_changed()` bumps `att->log->generation`, but the entry's `mr_generation` was already computed as `log->generation` + 1 in `attestation_mr_extend_locked()` and the slot reserved at that index. This couples two places by convention (compute N+1, call `changed()` which makes it N+1, append at N+1). If any future caller invokes `attestation_mr_changed()` without appending (or the reverse) the generation/index invariant silently breaks. Have one function that takes the next generation, stores the entry, and publishes it. Also, `log_init` uses `++log->generation` directly while extend uses `mr_changed()`: three different styles for the same counter.
+
+Also, `att->mr_read_generation` is incremented in lockstep with `log->generation` and is never otherwise modified; at this point it is a duplicate counter of `log->generation` (initial values: `log->generation` starts at `mrs_count` after `log_init`, `mr_read_generation` starts at 0, so they are not even equal, which looks accidental). Is a second counter needed? If it must differ (read-cache invalidation vs. journal), document why; otherwise use one. (Its only reader is `ctlv.c`, two patches later.)
+
+> +{
+> +	lockdep_assert_held(&att->lock);
+> +	att->log->generation++;
+> +	att->mr_read_generation++;
+> +}
+> +
+>  void attestation_stop(struct attestation *att)
+>  {
+>  	lockdep_assert_held(&att->lock);
+> @@ -165,6 +172,38 @@ void attestation_stop(struct attestation *att)
+>  	xa_unlock(&attestation_instances);
+>  }
+>  
+> +static struct attestation_mr *attestation_mr_alloc(struct attestation *att,
+
+Several issues:
+1. `attestation_mr_props_validate()` was already run for every MR by `attestation_provider_validate()` (patch 0015) right before; this is a redundant second validation.
+2. `xa_load()` followed by `xa_insert()` is redundant: `xa_insert()` returns `-EBUSY` for an occupied index (note: not `-EEXIST`, so the `-EEXIST` here is the only reason for the pre-check; just map `-EBUSY`).
+3. `struct attestation_mr` is a one-pointer wrapper around the already-immutable props. The xarray could store 'const `struct attestation_mr_props` *' directly (props pointers are documented as valid until `ctlv_destroy`), eliminating the kzalloc/kfree per MR, the free loop in `core_fini`, and the type.
+4. The return value (the new mr) is never used by the caller except for `IS_ERR()`; return int.
+5. Because @id is a user-visible unsigned int and used as the xarray index, mr ids up to `UINT_MAX` make the xarray sparse but that is fine.
+
+> +						   const struct attestation_mr_props *props)
+> +{
+> +	struct attestation_mr *mr;
+> +	int ret;
+> +
+> +	ret = attestation_mr_props_validate(att->provider, props);
+> +	if (ret)
+> +		return ERR_PTR(ret);
+> +	if (xa_load(&att->mrs, props->id))
+> +		return ERR_PTR(-EEXIST);
+> +	mr = kzalloc_obj(*mr, GFP_KERNEL);
+> +	if (!mr)
+> +		return ERR_PTR(-ENOMEM);
+> +	mr->props = props;
+> +	ret = xa_insert(&att->mrs, props->id, mr, GFP_KERNEL);
+> +	if (ret) {
+> +		kfree(mr);
+> +		return ERR_PTR(ret);
+> +	}
+> +	return mr;
+> +}
+> +
+> +struct attestation_mr *attestation_mr_lookup_live(struct attestation *att, unsigned int mr_id)
+
+Name: what is "live" as opposed to? There is no non-live lookup. Also it is a global function in `core.c` while the rest of the MR code is in `mr.c`. 'mr ? mr : `ERR_PTR(-ENOENT)`' can be 'mr ?: `ERR_PTR(-ENOENT)`'. Kernel-doc missing for the whole internal API in `internal.h`.
+
+> +{
+> +	struct attestation_mr *mr;
+> +
+> +	lockdep_assert_held(&att->lock);
+> +	mr = xa_load(&att->mrs, mr_id);
+> +	return mr ? mr : ERR_PTR(-ENOENT);
+> +}
+> +
+>  void attestation_provide_ops(struct attestation *att)
+>  {
+>  	const struct attestation_provider *provider = att->provider;
+> @@ -174,37 +213,66 @@ void attestation_provide_ops(struct attestation *att)
+>  		ctlv_attestation_evidence_get_provide(ctlvdev);
+>  		ctlv_attestation_evidence_get_enable(ctlvdev);
+>  	}
+> +	if (provider->mrs_count) {
+
+`mr_log_get`/`mr_dump`/`mr_get` are provided based on `mrs_count`, but if only evidence is supported there is no log at all; consistent. However note ops are 'provided' before the instance is visible, whereas `attestation_mr_log_init()` (which allocates `att->log` used by these ops) runs later in `post_init`. See comment there.
+
+> +		ctlv_attestation_mr_get_provide(ctlvdev);
+> +		ctlv_attestation_mr_dump_provide(ctlvdev);
+> +		ctlv_attestation_mr_log_get_provide(ctlvdev);
+> +		if (provider->mr_read)
+> +			ctlv_attestation_mr_read_provide(ctlvdev);
+> +		if (provider->mr_extend)
+> +			ctlv_attestation_mr_extend_provide(ctlvdev);
+> +	}
+>  }
+>  
+>  int attestation_core_init(struct attestation *att, struct ctlv_device *ctlvdev,
+>  			  const struct attestation_provider *provider)
+>  {
+> +	size_t index;
+>  	int ret;
+>  
+>  	ret = attestation_provider_validate(provider);
+>  	if (ret)
+>  		return ret;
+>  	mutex_init(&att->lock);
+> +	xa_init(&att->mrs);
+
+`att->log` is not initialised here (it relies on the priv being zeroed by CTLV); fine but fragile. More importantly the journal is allocated in `post_init()` rather than here, so there is a window and an extra failure mode: `post_init` failing leaves the instance in the registry (unmarked) until fini. There is no reason the log cannot be built in `core_init` (all inputs, `att->mrs`, are available), which would make `post_init` infallible again and let the 'initialized'/unwind logic stay in one place. Please explain or move.
+
+>  	att->ctlvdev = ctlvdev;
+>  	att->provider = provider;
+> +	for (index = 0; index < provider->mrs_count; index++) {
+> +		struct attestation_mr *mr;
+> +
+> +		mr = attestation_mr_alloc(att, &provider->mrs[index]);
+
+The loop allocs MRs one by one, and `mr_log_init` later walks the xarray to count them, allocates a temp 'infos' array, then walks again to insert. Three passes over what is a for-loop over `provider->mrs`; MR and its INFO log entry could be created together (the entry has everything it needs from props). See the `mr_log_init` comment.
+
+> +		if (IS_ERR(mr)) {
+> +			ret = PTR_ERR(mr);
+> +			goto err_mrs;
+> +		}
+> +	}
+>  	ret = attestation_registry_insert(att);
+>  	if (ret)
+> -		goto err_core;
+> +		goto err_mrs;
+>  	attestation_provide_ops(att);
+>  	att->initialized = true;
+>  	return 0;
+>  
+> -err_core:
+
+Label rename `err_core` -> `err_mrs` is misleading for the registry-insert failure which also jumps to it ('goto `err_mrs`' after `attestation_registry_insert()` fails). Churn from patch 0015; better to have the final label name in 0015.
+
+> +err_mrs:
+>  	attestation_core_fini(att);
+>  	return ret;
+>  }
+>  
+>  void attestation_core_fini(struct attestation *att)
+>  {
+> +	struct attestation_mr *mr;
+> +	unsigned long index;
+> +
+>  	if (!att->ctlvdev)
+>  		return;
+>  	if (att->initialized)
+>  		attestation_registry_remove(att);
+> +	xa_for_each(&att->mrs, index, mr) {
+
+`xa_erase()` per element followed by `xa_destroy()` is redundant: `xa_destroy()` frees the nodes; just kfree each mr in the walk and then `xa_destroy()`. (With the props-pointer suggestion above even the loop goes away.) The same pattern is repeated in `attestation_mr_log_free()`.
+
+> +		xa_erase(&att->mrs, index);
+> +		kfree(mr);
+> +	}
+> +	attestation_mr_log_free(att->log);
+> +	xa_destroy(&att->mrs);
+>  	mutex_destroy(&att->lock);
+>  	att->ctlvdev = NULL;
+>  }
+> @@ -222,7 +290,11 @@ int ctlv_attestation_init(struct ctlv_device *ctlvdev, const void *init_info, vo
+>  int ctlv_attestation_post_init(struct ctlv_device *ctlvdev, void *priv)
+>  {
+>  	struct attestation *att = priv;
+> +	int ret;
+>  
+> +	ret = attestation_mr_log_init(att);
+
+On failure here the registry entry remains with the REGISTERED mark unset. Check that CTLV treats `post_init` failure as a failed create and then calls `pre_fini`/fini (so `attestation_core_fini()` frees mrs). Also there is an asymmetry: `att->log` is freed in fini but allocated in `post_init`, so `attestation_core_fini()` must tolerate `att->log` == `NULL` (it does, via the `NULL` test in `attestation_mr_log_free()`).
+
+> +	if (ret)
+> +		return ret;
+>  	xa_lock(&attestation_instances);
+>  	__xa_set_mark(&attestation_instances, att->index, ATTESTATION_REGISTERED);
+>  	xa_unlock(&attestation_instances);
+> diff --git a/drivers/attestation/core/events.c b/drivers/attestation/core/events.c
+> new file mode 100644
+> index 000000000000..2cf8df4b6479
+> --- /dev/null
+> +++ b/drivers/attestation/core/events.c
+> @@ -0,0 +1,65 @@
+> +// SPDX-License-Identifier: GPL-2.0-only
+> +#include <linux/err.h>
+> +
+> +#include "internal.h"
+> +
+> +int attestation_events_prepare(struct attestation *att, struct attestation_event_batch *events)
+
+`struct attestation_event_batch` contains exactly one member (`mr_log`) and `struct attestation_event` wraps ctx+reply. 'batch' implies multiple events; this is speculative generality, and the abort/prepare/emit helper trio each has one caller. Collapse to a single `struct attestation_event` inside `struct attestation_mr_change`.
+
+Locking/lifetime: the event is allocated (`GFP_KERNEL`) with `att->lock` held and kept across the provider's `mr_extend()` callback, which can be slow (a TDX/TPM call). Is the event queue reservation per-device bounded? If userspace is not consuming events, can `create()` block or fail (`-ENOSPC`/`-EBUSY`), turning a full event queue into an inability to extend an MR? That is a policy decision that should be documented: failing a security-relevant extend because the event cannot be queued, versus (the current emit path) silently dropping the event after extending.
+
+`event->ctx` may be `NULL` on success? ctlv create helpers return `ERR_PTR` on error; the 'if (!`event->ctx`) return;' guards in abort/emit exist for the post-error NULLing, fine, but that means after a prepare failure the struct state is half-valid; since the caller discards the change on failure these NULLings in the error path of `attestation_events_prepare()` are dead.
+
+> +{
+> +	struct attestation_event *event = &events->mr_log;
+> +
+> +	lockdep_assert_held(&att->lock);
+> +	event->ctx = ctlv_attestation_mr_log_entry_appended_create(att->ctlvdev, &event->reply,
+> +								   GFP_KERNEL);
+> +	if (IS_ERR(event->ctx)) {
+> +		int ret = PTR_ERR(event->ctx);
+> +
+> +		event->ctx = NULL;
+> +		event->reply = NULL;
+> +		return ret;
+> +	}
+> +	return 0;
+> +}
+> +
+> +void attestation_events_abort(struct attestation_event_batch *events)
+> +{
+> +	struct attestation_event *event = &events->mr_log;
+> +
+> +	if (!event->ctx)
+> +		return;
+> +	ctlv_event_abort(event->ctx);
+> +	event->ctx = NULL;
+> +	event->reply = NULL;
+> +}
+> +
+> +static void attestation_event_finish(struct attestation_event *event, int ret)
+> +{
+> +	if (ret) {
+> +		pr_err("attestation event encoding failed: %d\n", ret);
+
+`pr_err()` without `pr_fmt` and without device identification; with multiple attestation instances (CVM may have several providers) the message is useless. Use `dev_err(ctlv_device_parent(att->ctlvdev), ...)`, which requires passing att. Also an encoding failure here is an internal bug (the event schema is fixed and the entry is at most N digests); consider `WARN_ON_ONCE`; and consider `ctlv_event_lost()` so listeners learn the journal has a gap - currently listeners silently miss the entry.
+
+> +		ctlv_event_abort(event->ctx);
+> +	} else {
+> +		ret = ctlv_event_emit(event->ctx);
+> +		if (ret)
+> +			pr_err("attestation event emission failed: %d\n", ret);
+> +	}
+> +	event->ctx = NULL;
+> +	event->reply = NULL;
+> +}
+> +
+> +void attestation_mr_log_event_emit(struct attestation_event_batch *events,
+> +				   const struct attestation_mr_log_entry *entry)
+> +{
+> +	struct attestation_event *event = &events->mr_log;
+> +	struct ctlv_cursor nested;
+> +	int ret;
+> +
+> +	if (!event->ctx)
+> +		return;
+> +	if (!ctlv_attestation_notification_entry_start(event->reply, &nested)) {
+
+If `notification_entry_start()` fails, 'ret = `-EMSGSIZE`; goto out' - fine; but then the `out:` label with one use of goto for a two-way branch is clunky. Also note a `mr_log` entry holding up to 23 digests of up to 64 bytes (approx 2 KB) must fit the event buffer; there is no check at validation time that mrs[].`algorithms_count` * digest sizes fits the event size limit, so a provider with large digest sets would deterministically hit the encoding-failure path above only at extend time, after the hardware MR was already extended. This should be validated in `attestation_provider_validate()` or the event size should be derived from the descriptor.
+
+> +		ret = -EMSGSIZE;
+> +		goto out;
+> +	}
+> +	ret = attestation_mr_log_entry_encode(&nested, entry);
+> +	ctlv_nest_end(&nested);
+> +out:
+> +	attestation_event_finish(event, ret);
+> +}
+> diff --git a/drivers/attestation/core/internal.h b/drivers/attestation/core/internal.h
+> index 767c02275d0f..64dca12a3d04 100644
+> --- a/drivers/attestation/core/internal.h
+> +++ b/drivers/attestation/core/internal.h
+> @@ -11,25 +11,98 @@
+>  
+>  #define ATTESTATION_REGISTERED XA_MARK_1
+>  
+> +enum attestation_mr_log_entry_type {
+
+No kernel-doc for any of the new structs (`attestation_mr_log_entry`*, `attestation_mr_log`, `attestation_mr_change`, event structs). Please document locking (all protected by `att->lock`) and ownership (who frees `change->entry` after success: it is set to `NULL` in `extend_locked`, ownership passes to the xarray).
+
+> +	ATTESTATION_MR_LOG_ENTRY_INFO,
+> +	ATTESTATION_MR_LOG_ENTRY_EXTEND,
+> +};
+> +
+> +struct attestation_mr_log_entry {
+
+Entries are keyed in the xarray by `mr_generation`, so the xarray is effectively an array indexed by position; the entries struct also stores `mr_generation`. OK. But 'enum type' discriminator + `container_of` in 4 places (free, encode, ...) vs. two tiny struct kinds: info entries are constant per MR (immutable props) and would not need a heap copy at all; see `info_alloc` comment.
+
+> +	unsigned int mr_generation;
+> +	unsigned int mr_id;
+> +	enum attestation_mr_log_entry_type type;
+> +};
+> +
+> +struct attestation_mr_log_entry_info {
+> +	struct attestation_mr_log_entry entry;
+> +	struct attestation_mr_props props;
+> +};
+> +
+> +struct attestation_mr_log_entry_extend {
+> +	struct attestation_mr_log_entry entry;
+> +	struct attestation_digest_set values;
+> +};
+> +
+> +struct attestation_mr_log {
+
+'`struct attestation_mr_log`' wraps {generation, xarray}; it is allocated separately (kzalloc) and referenced via a pointer from struct attestation, only to be freed in fini. Embed it in struct attestation: removes the allocation, the `NULL` checks in `log_free` and the `post_init` failure mode.
+
+> +	unsigned int generation;
+> +	struct xarray entries;
+> +};
+> +
+>  struct attestation {
+>  	struct ctlv_device *ctlvdev;
+>  	const struct attestation_provider *provider;
+>  	unsigned int index;
+>  
+> -	/* Mutable instance state. */
+> +	/* Mutable instance, MR, and journal state. */
+>  	struct mutex lock;
+> +	unsigned int mr_read_generation;
+
+See above: duplicates `log->generation` semantics; also nothing documents wraparound (unsigned int) - at `UINT_MAX` `mr_read_generation` wraps to 0 whereas `log->generation` is protected from overflow by the stop logic. A wrapped `mr_read_generation` can make a stale userspace generation match again.
+
+>  
+> +	struct xarray mrs;
+> +	struct attestation_mr_log *log;
+>  	bool initialized;
+>  };
+>  
+> -int attestation_core_init(struct attestation *att,
+> -			  struct ctlv_device *ctlvdev,
+> +struct attestation_mr {
+> +	const struct attestation_mr_props *props;
+> +};
+> +
+> +struct attestation_event {
+> +	struct ctlv_op_ctx *ctx;
+> +	struct ctlv_cursor *reply;
+> +};
+> +
+> +struct attestation_event_batch {
+> +	struct attestation_event mr_log;
+> +};
+> +
+> +struct attestation_mr_change {
+
+`change->mr` is used only to read `props->id`; '`struct attestation_mr_change`' as a heap-allocated transaction object (`kzalloc_obj` + free) for one call sequence prepare -> `extend_locked` -> free could live on the caller's stack (it has three small members). The heap alloc adds a failure path (`-ENOMEM`) for no reason. If the intent is to run the allocations outside `att->lock`, note that `attestation_mr_change_prepare()` asserts `att->lock` is held, so no such benefit exists.
+
+> +	struct attestation_mr *mr;
+> +	struct attestation_mr_log_entry_extend *entry;
+> +	struct attestation_event_batch events;
+> +};
+> +
+> +int attestation_core_init(struct attestation *att, struct ctlv_device *ctlvdev,
+>  			  const struct attestation_provider *provider);
+>  void attestation_core_fini(struct attestation *att);
+>  bool attestation_registered(struct attestation *att);
+>  void attestation_stop(struct attestation *att);
+> +void attestation_mr_changed(struct attestation *att);
+>  
+>  int attestation_provider_validate(const struct attestation_provider *provider);
+>  void attestation_provide_ops(struct attestation *att);
+>  
+> +struct attestation_mr *attestation_mr_lookup_live(struct attestation *att, unsigned int mr_id);
+> +int attestation_mr_values_validate(const struct attestation_mr *mr,
+
+Duplicate validation: this checks `values->values[i].algorithm` == `props->algorithms[i]`, which (given the ordered, validated props) already implies everything that `attestation_digest_set_copy()` re-checks (range, non-zero digest size, strictly increasing). Pick one. Also nothing checks the digest 'data' length: `struct attestation_digest` has a fixed `HASH_MAX_DIGESTSIZE` array while the true length is `hash_digest_size[algorithm]`; the bytes beyond are copied verbatim into the long-lived journal (`kmemdup_array`) and, if user-supplied via `mr_extend`, can hold anything. They are not leaked on encode (encode uses `digest_size`), but copying 64*N bytes per entry into an unbounded journal is wasteful; store compact digests.
+
+> +				   const struct attestation_digest_set *values);
+> +int attestation_mr_log_init(struct attestation *att);
+
+This function is far more complicated than needed. It counts MRs, allocates a temporary pointer array, allocates every INFO entry, then attaches `att->log`, then inserts, with two overlapping error labels (`err_attached` falls through into `err_infos` then `err_log`, with 'log = `NULL`' tricks to avoid a double free). I traced the paths and did not find a double free, but it is fragile. A single loop doing 'alloc info; `xa_insert`; on error call `attestation_mr_log_free(log)`' needs no temp array at all (entries already inserted are owned by the log; the one in flight is freed locally). The temp array only exists to separate allocation from generation numbering, which has no purpose.
+
+'if (`log->generation` == `UINT_MAX`) { ret = `-EOVERFLOW`; ...}' inside the init loop is unreachable in practice (it needs 2^32 MRs) - dead code. The per-MR iteration order is xarray (id) order, so generations of INFO entries follow MR id order; fine but undocumented.
+
+'int ret = `-ENOMEM`;' initial value is used only for the kcalloc failure path - set it explicitly there. 'count && !infos' - when count == 0 kcalloc returns `ZERO_SIZE_PTR` so the && is only needed for that case; simply skip the allocation if count == 0.
+
+> +struct attestation_mr_log_entry_info *attestation_mr_info_alloc(const struct attestation_mr *mr);
+
+Why deep-copy name and algorithms? The documentation in 0015 states "Their property storage remains valid until `ctlv_destroy()` or failed-creation unwind completes", and the journal is freed in `core_fini()` which runs strictly before that point. The INFO entry could reference `mr->props` directly; the kstrdup/`kmemdup_array`, three-label unwind and the matching `kfree()`s in `attestation_mr_log_entry_free()` are unnecessary. If the copy is deliberate (e.g. provider-module unload while journal readers exist), that contradicts the lifetime contract and should be stated.
+
+Also the function is non-static (declared in `internal.h`) but only used in `mr.c`. And error returns are `ERR_PTR(-ENOMEM)` hard-coded, ok.
+
+> +void attestation_mr_log_entry_free(struct attestation_mr_log_entry *entry);
+> +void attestation_mr_log_free(struct attestation_mr_log *log);
+> +void attestation_mr_log_append(struct attestation *att, struct attestation_mr_log_entry *entry);
+> +struct attestation_mr_change *
+> +attestation_mr_change_prepare(struct attestation *att, struct attestation_mr *mr,
+
+Missing validation: nothing checks that the MR is extendable (`props->extendable`) / `provider->mr_extend` != `NULL` here or in `extend_locked()`; the callback pointer is dereferenced unconditionally below. This relies on the CTLV handler (0017) having checked `mr->props->extendable` and on `attestation_mr_props_validate()` having rejected extendable && !`mr_extend`. Add a `WARN_ON_ONCE` or a documented precondition.
+
+> +			      const struct attestation_digest_set *values);
+> +const struct attestation_mr_log_entry *
+> +attestation_mr_extend_locked(struct attestation *att, struct attestation_mr_change *change);
+> +void attestation_mr_change_free(struct attestation_mr_change *change);
+> +
+> +int attestation_events_prepare(struct attestation *att, struct attestation_event_batch *events);
+> +void attestation_events_abort(struct attestation_event_batch *events);
+> +void attestation_mr_log_event_emit(struct attestation_event_batch *events,
+> +				   const struct attestation_mr_log_entry *entry);
+> +
+> +int attestation_mr_log_entry_encode(struct ctlv_cursor *reply,
+
+`attestation_mr_props_encode()` (`include_id` variant, used for MR get/dump) and `attestation_mr_info_encode()` in `mr.c` (static, used for the INFO log entry) are near-identical copies (name, algorithms, `register_index`, caps). Make one function taking 'const `struct attestation_mr_props` *' and an `include_id` flag; `attestation_mr_props_encode` taking `struct attestation_mr` is the only difference and is a trivial wrapper.
+
+> +				    const struct attestation_mr_log_entry *entry);
+> +int attestation_mr_props_encode(struct ctlv_cursor *reply, const struct attestation_mr *mr,
+
+As noted: duplicate of `attestation_mr_info_encode()` below. Also: 'ok &= ...' accumulates but continues to write after the first failure; harmless but pointless work. The standard kernel pattern is to return early on the first error.
+
+> +				bool include_id);
+> +
+>  #endif /* _ATTESTATION_INTERNAL_H */
+> diff --git a/drivers/attestation/core/mr.c b/drivers/attestation/core/mr.c
+> new file mode 100644
+> index 000000000000..db80cbd2b582
+> --- /dev/null
+> +++ b/drivers/attestation/core/mr.c
+> @@ -0,0 +1,376 @@
+> +// SPDX-License-Identifier: GPL-2.0-only
+> +#include <crypto/hash_info.h>
+> +#include <linux/cleanup.h>
+> +#include <linux/err.h>
+> +#include <linux/slab.h>
+> +#include <linux/string.h>
+> +
+> +#include "internal.h"
+> +
+> +int attestation_mr_values_validate(const struct attestation_mr *mr,
+> +				   const struct attestation_digest_set *values)
+> +{
+> +	size_t index;
+> +
+> +	if (!values || !values->values || values->values_count != mr->props->algorithms_count)
+> +		return -EINVAL;
+> +	for (index = 0; index < values->values_count; index++)
+> +		if (values->values[index].algorithm != mr->props->algorithms[index])
+> +			return -EINVAL;
+> +	return 0;
+> +}
+> +
+> +static int attestation_digest_set_copy(struct attestation_digest_set *dst,
+
+'algorithm >= `HASH_ALGO__LAST`': with `enum hash_algo` this is fine, but a negative/garbage enum (signed on some ABIs) is not rejected; cast to unsigned or rely on the validated ordering. The monotonic check here (strictly increasing) is also a re-validation of what `attestation_mr_values_validate()` established; and the `values_count` == 0 case is rejected here but for the check in `values_validate` it is rejected only indirectly via `algorithms_count` != 0.
+
+> +				       const struct attestation_digest_set *src)
+> +{
+> +	size_t index;
+> +
+> +	if (!src || !src->values || !src->values_count)
+> +		return -EINVAL;
+> +	for (index = 0; index < src->values_count; index++) {
+> +		enum hash_algo algorithm = src->values[index].algorithm;
+> +
+> +		if (algorithm >= HASH_ALGO__LAST || !hash_digest_size[algorithm] ||
+> +		    (index && src->values[index - 1].algorithm >= algorithm))
+> +			return -EINVAL;
+> +	}
+> +	dst->values =
+> +		kmemdup_array(src->values, src->values_count, sizeof(*src->values), GFP_KERNEL);
+> +	if (!dst->values)
+> +		return -ENOMEM;
+> +	dst->values_count = src->values_count;
+> +	return 0;
+> +}
+> +
+> +static void attestation_digest_set_free(struct attestation_digest_set *set)
+> +{
+> +	kfree(set->values);
+> +	set->values = NULL;
+> +	set->values_count = 0;
+> +}
+> +
+> +struct attestation_mr_log_entry_info *attestation_mr_info_alloc(const struct attestation_mr *mr)
+> +{
+> +	struct attestation_mr_log_entry_info *info;
+> +	enum hash_algo *algorithms;
+> +	char *name;
+> +
+> +	info = kzalloc_obj(*info, GFP_KERNEL);
+> +	if (!info)
+> +		return ERR_PTR(-ENOMEM);
+> +	name = kstrdup(mr->props->name, GFP_KERNEL);
+> +	if (!name)
+> +		goto err_info;
+> +	algorithms = kmemdup_array(mr->props->algorithms, mr->props->algorithms_count,
+> +				   sizeof(*algorithms), GFP_KERNEL);
+> +	if (!algorithms)
+> +		goto err_name;
+> +	info->entry.type = ATTESTATION_MR_LOG_ENTRY_INFO;
+> +	info->entry.mr_id = mr->props->id;
+> +	info->props = *mr->props;
+> +	info->props.name = name;
+> +	info->props.algorithms = algorithms;
+> +	return info;
+> +
+> +err_name:
+> +	kfree(name);
+> +err_info:
+> +	kfree(info);
+> +	return ERR_PTR(-ENOMEM);
+> +}
+> +
+> +void attestation_mr_log_entry_free(struct attestation_mr_log_entry *entry)
+> +{
+> +	if (!entry)
+> +		return;
+> +	switch (entry->type) {
+> +	case ATTESTATION_MR_LOG_ENTRY_INFO: {
+> +		struct attestation_mr_log_entry_info *info =
+> +			container_of(entry, typeof(*info), entry);
+> +
+> +		kfree(info->props.algorithms);
+> +		kfree(info->props.name);
+> +		kfree(info);
+> +		break;
+> +	}
+> +	case ATTESTATION_MR_LOG_ENTRY_EXTEND: {
+> +		struct attestation_mr_log_entry_extend *extend =
+> +			container_of(entry, typeof(*extend), entry);
+> +
+> +		attestation_digest_set_free(&extend->values);
+> +		kfree(extend);
+> +		break;
+> +	}
+> +	}
+> +}
+> +
+> +void attestation_mr_log_free(struct attestation_mr_log *log)
+> +{
+> +	struct attestation_mr_log_entry *entry;
+> +	unsigned long index;
+> +
+> +	if (!log)
+> +		return;
+> +	xa_for_each(&log->entries, index, entry) {
+> +		xa_erase(&log->entries, index);
+> +		attestation_mr_log_entry_free(entry);
+> +	}
+> +	xa_destroy(&log->entries);
+> +	kfree(log);
+> +}
+> +
+> +void attestation_mr_log_append(struct attestation *att, struct attestation_mr_log_entry *entry)
+> +{
+> +	struct attestation_mr_log *log = att->log;
+> +
+> +	xa_store(&log->entries, entry->mr_generation, entry, GFP_NOWAIT);
+
+Return value of `xa_store()` is ignored. It cannot fail only because the slot was `xa_reserve()`d in `attestation_mr_extend_locked()`; that precondition is non-local and undocumented. If the reservation is ever removed this silently leaks the entry and loses a journal record - after the hardware was extended. At least `WARN_ON(xa_is_err(...))`, or fold append into `extend_locked`. Also, for a 'static, one caller' function exported through `internal.h`, a bare helper that does one call is pointless.
+
+> +}
+> +
+> +int attestation_mr_log_init(struct attestation *att)
+> +{
+> +	struct attestation_mr_log_entry_info **infos;
+> +	struct attestation_mr_log *log;
+> +	struct attestation_mr *mr;
+> +	unsigned long mr_id;
+> +	size_t count = 0;
+> +	size_t index = 0;
+> +	int ret = -ENOMEM;
+> +
+> +	xa_for_each(&att->mrs, mr_id, mr)
+> +		count++;
+> +	log = kzalloc_obj(*log, GFP_KERNEL);
+> +	if (!log)
+> +		return -ENOMEM;
+> +	xa_init(&log->entries);
+> +	infos = kcalloc(count, sizeof(*infos), GFP_KERNEL);
+> +	if (count && !infos)
+> +		goto err_log;
+> +	xa_for_each(&att->mrs, mr_id, mr) {
+> +		infos[index] = attestation_mr_info_alloc(mr);
+> +		if (IS_ERR(infos[index])) {
+> +			ret = PTR_ERR(infos[index]);
+> +			infos[index] = NULL;
+> +			goto err_infos;
+> +		}
+> +		index++;
+> +	}
+> +
+> +	att->log = log;
+> +	index = 0;
+> +	xa_for_each(&att->mrs, mr_id, mr) {
+> +		struct attestation_mr_log_entry *entry = &infos[index]->entry;
+> +
+> +		if (log->generation == UINT_MAX) {
+> +			ret = -EOVERFLOW;
+> +			goto err_attached;
+> +		}
+> +		entry->mr_generation = ++log->generation;
+> +		ret = xa_insert(&log->entries, entry->mr_generation, entry, GFP_KERNEL);
+> +		if (ret)
+> +			goto err_attached;
+> +		infos[index++] = NULL;
+> +	}
+> +	kfree(infos);
+> +	return 0;
+> +
+> +err_attached:
+> +	att->log = NULL;
+> +	attestation_mr_log_free(log);
+> +	log = NULL;
+> +err_infos:
+> +	for (index = 0; index < count; index++)
+> +		if (infos[index])
+> +			attestation_mr_log_entry_free(&infos[index]->entry);
+> +	kfree(infos);
+> +err_log:
+> +	attestation_mr_log_free(log);
+> +	return ret;
+> +}
+> +
+> +static struct attestation_mr_log_entry_extend *
+
+Speculative generality: 'type' and 'size' parameters, but the only caller passes `ATTESTATION_MR_LOG_ENTRY_EXTEND` and `sizeof(*change->entry)`. Remove both parameters. The name 'extend' alloc and 'mr' parameter (only for `mr->props->id`) could take the id directly.
+
+> +attestation_extend_alloc(enum attestation_mr_log_entry_type type, size_t size,
+> +			 struct attestation_mr *mr, const struct attestation_digest_set *values)
+> +{
+> +	struct attestation_mr_log_entry_extend *extend;
+> +	int ret;
+> +
+> +	extend = kzalloc(size, GFP_KERNEL);
+
+kzalloc with a caller-provided size rather than `kzalloc_obj(*extend)`; inconsistent with every other allocation in this patch (`kzalloc_obj`), and it bypasses type/size checking.
+
+> +	if (!extend)
+> +		return ERR_PTR(-ENOMEM);
+> +	extend->entry.type = type;
+> +	extend->entry.mr_id = mr->props->id;
+> +	ret = attestation_digest_set_copy(&extend->values, values);
+> +	if (ret) {
+> +		kfree(extend);
+> +		return ERR_PTR(ret);
+> +	}
+> +	return extend;
+> +}
+> +
+> +struct attestation_mr_change *
+> +attestation_mr_change_prepare(struct attestation *att, struct attestation_mr *mr,
+> +			      const struct attestation_digest_set *values)
+> +{
+> +	struct attestation_mr_change *change;
+> +	int ret;
+> +
+> +	lockdep_assert_held(&att->lock);
+> +	change = kzalloc_obj(*change, GFP_KERNEL);
+> +	if (!change)
+> +		return ERR_PTR(-ENOMEM);
+> +	change->mr = mr;
+> +	change->entry = attestation_extend_alloc(ATTESTATION_MR_LOG_ENTRY_EXTEND,
+> +						 sizeof(*change->entry), mr, values);
+> +	if (IS_ERR(change->entry)) {
+> +		ret = PTR_ERR(change->entry);
+> +		goto err_change;
+> +	}
+> +	ret = attestation_events_prepare(att, &change->events);
+> +	if (ret)
+> +		goto err_entry;
+> +	return change;
+> +
+> +err_entry:
+> +	attestation_mr_log_entry_free(&change->entry->entry);
+> +err_change:
+> +	kfree(change);
+> +	return ERR_PTR(ret);
+> +}
+> +
+> +const struct attestation_mr_log_entry *
+> +attestation_mr_extend_locked(struct attestation *att, struct attestation_mr_change *change)
+> +{
+> +	struct attestation_mr_log_entry_extend *extend = change->entry;
+> +	struct attestation_mr_log_entry *entry = &extend->entry;
+> +	int ret;
+> +
+> +	lockdep_assert_held(&att->lock);
+> +	if (att->log->generation == UINT_MAX) {
+
+Behavioral question: at generation == `UINT_MAX` this calls `attestation_stop()` - un-registering the whole attestation instance (all evidence and MR operations then return `-ENODEV`) - because a further journal entry cannot be recorded. That is a drastic, silent, permanent DoS-by-exhaustion: reaching 2^32 extends is slow, but nothing limits the rate or memory. More realistically, the journal is append-only and unbounded in memory: each extend permanently allocates a heap entry (~ 68*N + header bytes) with `GFP_KERNEL` and no `__GFP_ACCOUNT`; any caller allowed to issue `mr_extend` (what is the permission model in 0017?) can exhaust kernel memory. There should be a cap (e.g. configurable max entries) and charge to memcg, or at least this must be called out in the commit message. Also `attestation_stop()` requires the xa spin lock but the instance remains in the xarray; subsequent ops see `-ENODEV` with no log message - add a `pr_warn`/`dev_warn`.
+
+Also `-EOVERFLOW` is returned to userspace for a state that is not a bad argument; `-ENOSPC` would be more conventional, and the first caller to hit it gets an error while `mr_extend` wasn't invoked, OK.
+
+> +		attestation_stop(att);
+> +		return ERR_PTR(-EOVERFLOW);
+> +	}
+> +	entry->mr_generation = att->log->generation + 1;
+> +	ret = xa_reserve(&att->log->entries, entry->mr_generation, GFP_KERNEL);
+
+`xa_reserve()` with `GFP_KERNEL` under `att->lock` (mutex, so sleeping is OK). The reservation could be done in `attestation_mr_change_prepare()` together with the other allocations, so that `extend_locked()` has literally no failure path other than the provider's, matching the documentation ("The core allocates the complete journal entry and event before invoking `mr_extend`"). As written the doc is wrong: the xarray slot is reserved after prepare, inside `extend_locked`, and that can fail with `-ENOMEM` before the callback - acceptable but the doc and the structure disagree; and the generation to reserve cannot be known in prepare unless `att->lock` is held (it is asserted held), so reserve there.
+
+> +	if (ret)
+> +		return ERR_PTR(ret);
+> +	ret = att->provider->mr_extend(att, change->mr->props->id, &extend->values);
+> +	if (ret) {
+> +		xa_release(&att->log->entries, entry->mr_generation);
+
+On `mr_extend()` failure the provider may have partially extended the hardware register (e.g. TDX/TPM returned an error after the extend took effect, or timed out). The journal then lacks an entry for a state change that may have happened, and generation/`mr_read_generation` are not bumped, so cached reads by generation are not invalidated. At a minimum, bump `mr_read_generation` (invalidate caches) on any provider error, or document that `mr_extend` must be atomic.
+
+> +		return ERR_PTR(ret);
+> +	}
+> +	attestation_mr_changed(att);
+> +	attestation_mr_log_append(att, entry);
+> +	attestation_mr_log_event_emit(&change->events, entry);
+
+The event is emitted while holding `att->lock` (documented design), and 'entry' is passed as const pointer to encode; after `xa_store` the entry is visible to journal readers only under `att->lock`, so no race. OK. But the order matters: the event reports an entry whose ownership already moved to the xarray; fine.
+
+`change->entry` = `NULL` below is the only 'ownership transfer'; instead of that pattern let append take the pointer.
+
+> +	change->entry = NULL;
+> +	return entry;
+> +}
+> +
+> +void attestation_mr_change_free(struct attestation_mr_change *change)
+> +{
+> +	if (!change)
+> +		return;
+> +	attestation_events_abort(&change->events);
+> +	if (change->entry)
+> +		attestation_mr_log_entry_free(&change->entry->entry);
+> +	kfree(change);
+> +}
+> +
+> +int attestation_mr_props_encode(struct ctlv_cursor *reply, const struct attestation_mr *mr,
+> +				bool include_id)
+> +{
+> +	u64 caps = 0;
+> +	size_t index;
+> +	bool ok = true;
+> +
+> +	if (include_id)
+> +		ok &= ctlv_attestation_mr_id_put(reply, mr->props->id);
+> +	ok &= ctlv_attestation_mr_name_put(reply, mr->props->name);
+> +	for (index = 0; index < mr->props->algorithms_count; index++)
+> +		ok &= ctlv_attestation_mr_supported_hash_algo_put(reply,
+> +								  mr->props->algorithms[index]);
+> +	if (mr->props->has_register_index)
+> +		ok &= ctlv_attestation_mr_register_index_put(reply, mr->props->register_index);
+> +	if (mr->props->readable)
+> +		caps |= CTLV_ATTESTATION_MR_CAPS_READ;
+> +	if (mr->props->extendable)
+> +		caps |= CTLV_ATTESTATION_MR_CAPS_EXTEND;
+> +	ok &= ctlv_attestation_mr_caps_put(reply, caps);
+> +	return ok ? 0 : -EMSGSIZE;
+> +}
+> +
+> +static int attestation_values_encode(struct ctlv_cursor *reply,
+> +				     const struct attestation_digest_set *values)
+> +{
+> +	struct ctlv_cursor nested;
+> +	size_t index;
+> +	bool ok = true;
+> +
+> +	for (index = 0; index < values->values_count; index++) {
+> +		const struct attestation_digest *value = &values->values[index];
+> +
+> +		if (!ctlv_attestation_mr_value_start(reply, &nested))
+> +			return -EMSGSIZE;
+> +		ok &= ctlv_attestation_mr_hash_algo_put(&nested, value->algorithm);
+> +		ok &= ctlv_attestation_mr_data_put(&nested, value->data,
+
+Info-leak check: only `hash_digest_size[algorithm]` bytes of `value->data` are encoded, so uninitialised tail bytes are not exposed. However `hash_digest_size[]` is indexed by `value->algorithm` taken from stored entries; those were validated earlier (range check in `digest_set_copy`), fine. The nested cursor is closed with `ctlv_nest_end()` on the failure path of `put()` but the early 'return `-EMSGSIZE`' after `nest_start` failure is OK.
+
+> +						   hash_digest_size[value->algorithm]);
+> +		ctlv_nest_end(&nested);
+> +	}
+> +	return ok ? 0 : -EMSGSIZE;
+> +}
+> +
+> +static int attestation_mr_info_encode(struct ctlv_cursor *reply,
+
+Duplicate of `attestation_mr_props_encode()` above (same body modulo the id and the argument type).
+
+> +				      const struct attestation_mr_props *props)
+> +{
+> +	u64 caps = 0;
+> +	size_t index;
+> +	bool ok;
+> +
+> +	ok = ctlv_attestation_mr_name_put(reply, props->name);
+> +	for (index = 0; index < props->algorithms_count; index++)
+> +		ok &= ctlv_attestation_mr_supported_hash_algo_put(reply,
+> +								  props->algorithms[index]);
+> +	if (props->has_register_index)
+> +		ok &= ctlv_attestation_mr_register_index_put(reply, props->register_index);
+> +	if (props->readable)
+> +		caps |= CTLV_ATTESTATION_MR_CAPS_READ;
+> +	if (props->extendable)
+> +		caps |= CTLV_ATTESTATION_MR_CAPS_EXTEND;
+> +	ok &= ctlv_attestation_mr_caps_put(reply, caps);
+> +	return ok ? 0 : -EMSGSIZE;
+> +}
+> +
+> +int attestation_mr_log_entry_encode(struct ctlv_cursor *reply,
+> +				    const struct attestation_mr_log_entry *entry)
+> +{
+> +	struct ctlv_cursor nested;
+> +	bool ok;
+> +	int ret;
+> +
+> +	ok = ctlv_attestation_mr_generation_put(reply, entry->mr_generation);
+> +	ok &= ctlv_attestation_mr_id_put(reply, entry->mr_id);
+> +	ok &= ctlv_attestation_log_event_put(reply, entry->type == ATTESTATION_MR_LOG_ENTRY_INFO ?
+> +							    CTLV_ATTESTATION_MR_LOG_EVENT_INFO :
+> +							    CTLV_ATTESTATION_MR_LOG_EVENT_EXTEND);
+> +	if (!ok)
+> +		return -EMSGSIZE;
+> +
+> +	if (entry->type == ATTESTATION_MR_LOG_ENTRY_INFO) {
+> +		const struct attestation_mr_log_entry_info *info =
+> +			container_of(entry, typeof(*info), entry);
+> +
+> +		if (!ctlv_attestation_log_mr_start(reply, &nested))
+> +			return -EMSGSIZE;
+> +		ret = attestation_mr_info_encode(&nested, &info->props);
+> +		ctlv_nest_end(&nested);
+> +		return ret;
+> +	}
+> +
+> +	ret = attestation_values_encode(reply,
+
+Style: the `container_of()` on const with 'typeof'-less struct name, dereferenced with `->values` on the next line, is hard to read; use a local variable like the INFO branch does. 'if (ret) return ret; return 0;' below is just 'return ret;'. And the function structure (type check done twice, INFO branch returns early) would be simpler as a switch on `entry->type`, matching `attestation_mr_log_entry_free()`.
+
+> +					&container_of(entry,
+> +						      const struct attestation_mr_log_entry_extend,
+> +						      entry)
+> +						 ->values);
+> +	if (ret)
+> +		return ret;
+> +	return 0;
+> +}
+> -- 
+> 2.55.0
+>
+
+-- 
+Summary:
+Most serious issues:
+- Unbounded, un-accounted, append-only kernel memory journal (one heap entry per extend, each carrying full `HASH_MAX_DIGESTSIZE`-sized digests); at `UINT_MAX` the whole instance is silently stopped via `attestation_stop()`. Needs a cap / memcg accounting and a log message.
+- Documentation claims "infallible publication" and "allocates the complete journal entry and event before invoking `mr_extend`", but event emission/encoding can fail (only `pr_err`) and the xarray slot is reserved after prepare, inside `extend_locked`. Event size vs MR digest-set size is never validated up front, so the failure surfaces only after the hardware was extended.
+- On `mr_extend()` failure no generation/`mr_read_generation` update, though the hardware might have changed; `mr_read_generation` duplicates `log->generation` and can wrap.
+- Needless complexity and dead code: INFO entries deep-copy immutable props; `mr_log_init` uses a temp array and a `UINT_MAX` check that is unreachable; one-member `event_batch`; size/type params of `extend_alloc` with one caller; `struct attestation_mr` wrapper; separately allocated log; heap-allocated `mr_change`; duplicated props/info encoders; duplicated validation; `xa_erase` before `xa_destroy`.
+- `attestation_mr_log_append` ignores `xa_store()` result relying on a non-local reservation.
+- Whole patch has no caller until 0017 (unbuildable, unreviewable in isolation); journal allocation in `post_init()` adds a needless failure mode.

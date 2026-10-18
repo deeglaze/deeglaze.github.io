@@ -1,0 +1,308 @@
+{
+ "patch": 16,
+ "title": "attestation: Prepare measurement register journal",
+ "overview": "Adds the measurement-register layer to the attestation core: per-instance MR objects built from the provider's fixed MR list, an append-only journal of INFO and EXTEND entries keyed by MR generation, and a prepare/commit scheme for extensions that allocates everything (entry and event) before calling the provider so publication is infallible. mr.c holds journal and MR logic, events.c wraps CTLV event creation and emission, core.c wires MR setup into init/fini, and internal.h declares the shared types. The CTLV operation handlers that consume these helpers arrive in patch 17.",
+ "files": [
+  {
+   "path": "Documentation/driver-api/attestation.rst",
+   "purpose": "Driver-API document for the attestation subsystem.",
+   "units": [
+    {
+     "title": "MR journal section",
+     "kind": "doc",
+     "start": 34,
+     "end": 40,
+     "anchor": "MR journal",
+     "summary": "Documents that MR extension is transactional: all allocations happen before mr_extend, and publication after success cannot fail.",
+     "details": "Implemented by `attestation_mr_change_prepare()` and `attestation_mr_extend_locked()` in mr.c."
+    }
+   ]
+  },
+  {
+   "path": "drivers/attestation/Makefile",
+   "purpose": "Build rules for the attestation module.",
+   "units": [
+    {
+     "title": "Add events.o and mr.o",
+     "kind": "build",
+     "start": 53,
+     "end": 54,
+     "anchor": "attestation-y",
+     "summary": "Links the new journal and event objects into the attestation module."
+    }
+   ]
+  },
+  {
+   "path": "drivers/attestation/core/core.c",
+   "purpose": "Instance registry and lifecycle (from patch 15), here extended to build MR objects at init, allocate the journal at post_init and free both at fini.",
+   "units": [
+    {
+     "title": "attestation_mr_changed()",
+     "kind": "function",
+     "start": 63,
+     "end": 68,
+     "anchor": "void attestation_mr_changed",
+     "summary": "Bumps the journal generation and the MR read generation after a successful state change.",
+     "details": "Called with `att->lock` held from `attestation_mr_extend_locked()`. `log->generation` is the key of the next journal entry; `mr_read_generation` lets readers detect changes to MR values."
+    },
+    {
+     "title": "attestation_mr_alloc()",
+     "kind": "function",
+     "start": 77,
+     "end": 98,
+     "anchor": "static struct attestation_mr *attestation_mr_alloc",
+     "summary": "Validates one MR descriptor, rejects duplicate IDs and inserts a new `struct attestation_mr` into `att->mrs`.",
+     "details": "Reuses `attestation_mr_props_validate()` from patch 15. The xarray index is the provider-unique MR id."
+    },
+    {
+     "title": "attestation_mr_lookup_live()",
+     "kind": "function",
+     "start": 100,
+     "end": 107,
+     "anchor": "struct attestation_mr *attestation_mr_lookup_live",
+     "summary": "Looks up an MR by id under the instance lock, returning ERR_PTR(-ENOENT) if absent.",
+     "details": "Intended for the operation handlers in patch 17."
+    },
+    {
+     "title": "attestation_provide_ops() - MR operations",
+     "kind": "function",
+     "start": 116,
+     "end": 124,
+     "anchor": "if (provider->mrs_count) {",
+     "summary": "When the provider has MRs, provides the MR get, dump and log-get operations, plus read and extend only if the provider implements them."
+    },
+    {
+     "title": "attestation_core_init() - MR setup",
+     "kind": "function",
+     "start": 127,
+     "end": 161,
+     "anchor": "int attestation_core_init",
+     "summary": "Init now initializes the `mrs` xarray and creates an MR object for every provider MR before registering the instance.",
+     "details": "Failure after the lock and xarray init goes to `err_mrs`, which calls `attestation_core_fini()` to free any MRs already created."
+    },
+    {
+     "title": "attestation_core_fini() - MR teardown",
+     "kind": "function",
+     "start": 163,
+     "end": 180,
+     "anchor": "void attestation_core_fini",
+     "summary": "Fini now erases and frees all MR objects, frees the journal and destroys the xarray before the mutex.",
+     "details": "`attestation_mr_log_free()` accepts NULL, so this is safe when post_init never ran."
+    },
+    {
+     "title": "ctlv_attestation_post_init() - journal init",
+     "kind": "function",
+     "start": 182,
+     "end": 192,
+     "anchor": "int ctlv_attestation_post_init",
+     "summary": "post_init builds the initial journal before the instance is marked registered; failure leaves the instance unregistered.",
+     "details": "The initial journal holds one INFO entry per MR."
+    }
+   ]
+  },
+  {
+   "path": "drivers/attestation/core/events.c",
+   "purpose": "Wrapper around the generated CTLV event helpers for the MR-log notification. It supports a prepare, then emit-or-abort pattern so an event buffer exists before a provider call is made. Used by mr.c.",
+   "units": [
+    {
+     "title": "attestation_events_prepare() and abort()",
+     "kind": "function",
+     "start": 199,
+     "end": 230,
+     "anchor": "SPDX",
+     "summary": "Creates the entry-appended event context up front (GFP_KERNEL) and aborts it if the operation fails.",
+     "details": "The batch is zeroed on error so abort is idempotent; `ctx` and `reply` are the CTLV event context and its payload cursor."
+    },
+    {
+     "title": "attestation_event_finish()",
+     "kind": "function",
+     "start": 232,
+     "end": 244,
+     "anchor": "static void attestation_event_finish",
+     "summary": "Emits the event on success or aborts it on an encoding error, logging failures and clearing the event.",
+     "details": "Emission errors are only logged; they do not undo the committed journal change."
+    },
+    {
+     "title": "attestation_mr_log_event_emit()",
+     "kind": "function",
+     "start": 246,
+     "end": 263,
+     "anchor": "void attestation_mr_log_event_emit",
+     "summary": "Encodes a journal entry into the prepared event's nested entry attribute and finishes the event.",
+     "details": "Uses `attestation_mr_log_entry_encode()` from mr.c; does nothing if no event was prepared."
+    }
+   ]
+  },
+  {
+   "path": "drivers/attestation/core/internal.h",
+   "purpose": "Private header for the core. This patch adds the journal, MR and event types and the prototypes for mr.c and events.c.",
+   "units": [
+    {
+     "title": "Journal entry types",
+     "kind": "struct",
+     "start": 272,
+     "end": 296,
+     "anchor": "enum attestation_mr_log_entry_type",
+     "summary": "Defines the journal: a base entry (generation, MR id, type) embedded in INFO and EXTEND variants, and the log holding entries in an xarray keyed by generation.",
+     "details": "INFO carries a copy of the MR properties; EXTEND carries the digest set that was extended. Variants are recovered with `container_of()`."
+    },
+    {
+     "title": "struct attestation changes",
+     "kind": "struct",
+     "start": 298,
+     "end": 311,
+     "anchor": "struct attestation {",
+     "summary": "Adds the MR read generation counter, the `mrs` xarray and the `log` pointer to the instance state.",
+     "details": "All are guarded by `att->lock`."
+    },
+    {
+     "title": "MR, event and change types",
+     "kind": "struct",
+     "start": 315,
+     "end": 332,
+     "anchor": "struct attestation_mr {",
+     "summary": "The per-MR object, the prepared event, an event batch, and `struct attestation_mr_change` bundling the MR, a preallocated EXTEND entry and the prepared events.",
+     "details": "A change is built by `attestation_mr_change_prepare()` before the provider is called."
+    },
+    {
+     "title": "Prototypes",
+     "kind": "function",
+     "start": 334,
+     "end": 367,
+     "anchor": "int attestation_core_init(struct attestation *att, struct ctlv_device *ctlvdev,",
+     "summary": "Declarations for core, MR, journal, event and encoding helpers."
+    }
+   ]
+  },
+  {
+   "path": "drivers/attestation/core/mr.c",
+   "purpose": "MR values, the append-only journal, the transactional extend path and the CTLV encoders for MR properties and journal entries. Callers are the core (init/fini) and the operation handlers in patch 17; it calls the provider's mr_extend and the generated attribute put helpers.",
+   "units": [
+    {
+     "title": "Includes and attestation_mr_values_validate()",
+     "kind": "function",
+     "start": 376,
+     "end": 396,
+     "anchor": "// SPDX-License-Identifier",
+     "summary": "Checks that a digest set matches the MR's algorithm list exactly in count and order."
+    },
+    {
+     "title": "Digest set copy and free",
+     "kind": "function",
+     "start": 398,
+     "end": 425,
+     "anchor": "static int attestation_digest_set_copy",
+     "summary": "Deep-copies a digest set after checking algorithms are known and strictly ascending; free releases it.",
+     "details": "The copy is stored in an EXTEND entry so the journal does not reference caller memory."
+    },
+    {
+     "title": "attestation_mr_info_alloc()",
+     "kind": "function",
+     "start": 427,
+     "end": 455,
+     "anchor": "struct attestation_mr_log_entry_info *attestation_mr_info_alloc",
+     "summary": "Builds an INFO journal entry holding a private copy of the MR's name and algorithm array.",
+     "details": "The copy lets journal entries outlive any provider-owned storage assumptions and be freed independently."
+    },
+    {
+     "title": "Journal entry and log free",
+     "kind": "function",
+     "start": 457,
+     "end": 495,
+     "anchor": "void attestation_mr_log_entry_free",
+     "summary": "Frees an entry according to its type, and frees a whole log by erasing every entry.",
+     "details": "The type switch mirrors the allocation sites for INFO and EXTEND entries."
+    },
+    {
+     "title": "attestation_mr_log_append()",
+     "kind": "function",
+     "start": 497,
+     "end": 502,
+     "anchor": "void attestation_mr_log_append",
+     "summary": "Stores an entry at its generation key using a slot reserved earlier.",
+     "details": "GFP_NOWAIT is safe because `attestation_mr_extend_locked()` reserved the slot with `xa_reserve()` first; this is the infallible publication step."
+    },
+    {
+     "title": "attestation_mr_log_init()",
+     "kind": "function",
+     "start": 504,
+     "end": 563,
+     "anchor": "int attestation_mr_log_init",
+     "summary": "Creates the journal and seeds it with one INFO entry per MR, allocating all entries first and attaching them only when none can fail.",
+     "details": "- Phase one allocates every INFO entry into a temporary array.\n- Phase two assigns increasing generations and inserts them; inserted slots are NULLed in the array so error paths free each entry once.\n- Error labels unwind either an attached log or the unattached entries."
+    },
+    {
+     "title": "attestation_extend_alloc()",
+     "kind": "function",
+     "start": 565,
+     "end": 583,
+     "anchor": "static struct attestation_mr_log_entry_extend",
+     "summary": "Allocates an EXTEND entry and copies the digest values into it.",
+     "details": "Takes the allocation size so the caller supplies the concrete entry struct."
+    },
+    {
+     "title": "attestation_mr_change_prepare()",
+     "kind": "function",
+     "start": 585,
+     "end": 613,
+     "anchor": "struct attestation_mr_change *",
+     "summary": "First phase of an extend: allocate the change, the EXTEND entry and the prepared event, all before calling the provider.",
+     "details": "Called with `att->lock` held; any failure frees what was allocated and returns an ERR_PTR."
+    },
+    {
+     "title": "attestation_mr_extend_locked()",
+     "kind": "function",
+     "start": 615,
+     "end": 641,
+     "anchor": "const struct attestation_mr_log_entry *",
+     "summary": "Second phase: reserve the journal slot, call the provider's mr_extend, then publish the entry, bump generations and emit the event.",
+     "details": "- If the generation counter is exhausted, the instance is stopped (`attestation_stop()`) and -EOVERFLOW returned.\n- Provider failure releases the reservation; nothing is published.\n- On success ownership of the entry moves to the log (`change->entry = NULL`)."
+    },
+    {
+     "title": "attestation_mr_change_free()",
+     "kind": "function",
+     "start": 643,
+     "end": 651,
+     "anchor": "void attestation_mr_change_free",
+     "summary": "Releases a change: aborts any unemitted event and frees an entry that was not published."
+    },
+    {
+     "title": "attestation_mr_props_encode()",
+     "kind": "function",
+     "start": 653,
+     "end": 674,
+     "anchor": "int attestation_mr_props_encode",
+     "summary": "Encodes live MR properties (optional id, name, algorithms, register index, capability bits) into a reply cursor.",
+     "details": "Returns -EMSGSIZE if any put fails. Used by MR get/dump replies in patch 17."
+    },
+    {
+     "title": "attestation_values_encode()",
+     "kind": "function",
+     "start": 676,
+     "end": 694,
+     "anchor": "static int attestation_values_encode",
+     "summary": "Encodes each digest as a nested value with its hash algorithm and data bytes.",
+     "details": "Digest length is taken from `hash_digest_size[]`."
+    },
+    {
+     "title": "attestation_mr_info_encode()",
+     "kind": "function",
+     "start": 696,
+     "end": 715,
+     "anchor": "static int attestation_mr_info_encode",
+     "summary": "Encodes a copied props struct from an INFO journal entry (name, algorithms, register index, caps).",
+     "details": "Same layout as the props encoder but without the id, since the entry already carries it."
+    },
+    {
+     "title": "attestation_mr_log_entry_encode()",
+     "kind": "function",
+     "start": 717,
+     "end": 751,
+     "anchor": "int attestation_mr_log_entry_encode",
+     "summary": "Encodes a journal entry: generation, MR id, event kind, then INFO properties or EXTEND digest values.",
+     "details": "Used both for journal dump/get replies (patch 17) and for the MR-log notification event."
+    }
+   ]
+  }
+ ]
+}

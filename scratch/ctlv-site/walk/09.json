@@ -1,0 +1,269 @@
+{
+ "patch": 9,
+ "title": "ctlv: Prepare VA blob handling",
+ "overview": "Adds the blob layer: a family callback can resolve a validated blob descriptor in the request into a pinned, CPU-accessible user buffer, read or write it by offset, and release it. blob.c sits on top of blob_desc.c (descriptor decode and check) and message.h (cursors, error offsets); internal.h gains the per-op state it needs, and the two public headers expose the family-facing API. The object is compile-checked on its own; device dispatch (patch 12) later sets the submitter and drives context init/finish.",
+ "files": [
+  {
+   "path": "drivers/ctlv/Makefile",
+   "purpose": "Kbuild list for the ctlv module object.",
+   "units": [
+    {
+     "title": "Add blob.o to ctlv-y",
+     "kind": "build",
+     "start": 34,
+     "end": 35,
+     "anchor": "ctlv-y",
+     "summary": "Links the new blob.o into the ctlv module (still unreachable until CONFIG_CTLV is wired up)."
+    }
+   ]
+  },
+  {
+   "path": "drivers/ctlv/blob.c",
+   "purpose": "Implements task-bound VA blobs: pinning user pages for the duration of one op, copying to and from them, tracking them on the op context, and the exported resolve/read/write/put API used by families. Called from family callbacks (via the CTLV_IN_*BLOB helpers) and from the dispatch code through the context init/track/finish hooks.",
+   "units": [
+    {
+     "title": "Header, includes",
+     "kind": "section",
+     "start": 42,
+     "end": 73,
+     "anchor": "SPDX-License-Identifier",
+     "summary": "License, file comment (backing is acquired lazily in the submitting task and held until put) and includes."
+    },
+    {
+     "title": "struct ctlv_blob",
+     "kind": "struct",
+     "start": 75,
+     "end": 89,
+     "anchor": "struct ctlv_blob {",
+     "summary": "One resolved blob: length, direction, type, owning op context and list linkage, plus a union of per-type backing state.",
+     "details": "- Only the `va` member exists so far: the `mm` that was grabbed, the pinned `pages` array and count, and `start`, the offset of the buffer within its first page.\n- `ctx` is NULL once the blob has been untracked."
+    },
+    {
+     "title": "Direction and liveness predicates",
+     "kind": "function",
+     "start": 91,
+     "end": 109,
+     "anchor": "static bool ctlv_blob_readable(",
+     "summary": "Small checks: readable unless output-only, writable unless input-only, and access allowed only from the submitting task while the op's blobs are live.",
+     "details": "`ctlv_blob_same_task()` treats a missing ctx or submitter as unconstrained; `ctlv_blob_access_live()` additionally requires `ctx->blobs_live`, which `ctlv_blob_context_finish()` clears."
+    },
+    {
+     "title": "ctlv_blob_pin_charge()",
+     "kind": "function",
+     "start": 111,
+     "end": 124,
+     "anchor": "/*",
+     "summary": "Charges the pages to the mm's `pinned_vm` against RLIMIT_MEMLOCK, bypassed by CAP_IPC_LOCK.",
+     "details": "The pin is short-lived (one op), hence not FOLL_LONGTERM. On refusal the charge is rolled back and -ENOMEM returned. Undone in `ctlv_blob_va_release()` or the acquire error path."
+    },
+    {
+     "title": "ctlv_blob_va_range()",
+     "kind": "function",
+     "start": 126,
+     "end": 149,
+     "anchor": "static int ctlv_blob_va_range(",
+     "summary": "Converts a user address and length into the first page address and page count, with overflow and TASK_SIZE checks.",
+     "details": "Rejects zero length (-EINVAL) and ranges that wrap, exceed TASK_SIZE, or would make the page-pointer array size overflow (-EFAULT). Runs before anything is charged or allocated."
+    },
+    {
+     "title": "ctlv_blob_va_acquire() - sizing, charge",
+     "kind": "function",
+     "start": 151,
+     "end": 171,
+     "anchor": "static int ctlv_blob_va_acquire(",
+     "summary": "First phase of pinning a VA blob: compute the range, allocate the page array, pick FOLL_WRITE and charge RLIMIT_MEMLOCK.",
+     "details": "Writable blobs (output or inout) pin with `FOLL_WRITE`. The page array is accounted with `GFP_KERNEL_ACCOUNT`."
+    },
+    {
+     "title": "ctlv_blob_va_acquire() - pin and commit",
+     "kind": "function",
+     "start": 173,
+     "end": 201,
+     "anchor": "while (pinned < pages_count)",
+     "summary": "Pins pages in INT_MAX-bounded batches, then publishes the state into the blob and grabs the mm; error labels unwind pins, charge and array.",
+     "details": "- A short pin counts as progress; zero or negative stops the loop.\n- `mmgrab(current->mm)` keeps the mm_struct alive so the later unpin and uncharge are safe even if the submitter exits.\n- `err_unpin` releases only the pages actually pinned but returns the whole charge."
+    },
+    {
+     "title": "ctlv_blob_va_release() and ctlv_blob_va_copy()",
+     "kind": "function",
+     "start": 203,
+     "end": 231,
+     "anchor": "static void ctlv_blob_va_release(",
+     "summary": "Release unpins (dirtying if writable), uncharges, frees the array and drops the mm; copy walks the pinned pages with memcpy_to/from_page.",
+     "details": "`ctlv_blob_va_copy()` assumes the range has already been checked by `ctlv_blob_range_ok()`; it starts at `va.start + offset` and moves page by page."
+    },
+    {
+     "title": "ctlv_blob_len()",
+     "kind": "function",
+     "start": 233,
+     "end": 237,
+     "anchor": "u64 ctlv_blob_len(",
+     "summary": "Exported accessor for the blob length."
+    },
+    {
+     "title": "ctlv_blob_range_ok()",
+     "kind": "function",
+     "start": 239,
+     "end": 254,
+     "anchor": "/*",
+     "summary": "Checks that an access matches the blob's direction, happens in the submitting task while live, and lies within the length.",
+     "details": "Each failure is a WARN_ON_ONCE, since direction, length and offsets are the family's responsibility rather than the caller's."
+    },
+    {
+     "title": "ctlv_blob_copy(), ctlv_blob_read(), ctlv_blob_write()",
+     "kind": "function",
+     "start": 256,
+     "end": 282,
+     "anchor": "static int ctlv_blob_copy(",
+     "summary": "Common checked copy dispatched on blob type, with exported read and write wrappers.",
+     "details": "Zero-length copies succeed after the check. Only `CTLV_BLOB_TYPE_VA` is handled; other types return -EINVAL. `ctlv_blob_write()` casts away const for the shared helper."
+    },
+    {
+     "title": "ctlv_blob_put()",
+     "kind": "function",
+     "start": 284,
+     "end": 303,
+     "anchor": "int ctlv_blob_put(",
+     "summary": "Releases a blob: type-specific release, unlink from the op context, free.",
+     "details": "NULL is accepted. Must run in the submitting task. Also used by `ctlv_blob_context_finish()` for blobs the family forgot to put."
+    },
+    {
+     "title": "Context init, track, finish",
+     "kind": "function",
+     "start": 305,
+     "end": 329,
+     "anchor": "void ctlv_blob_context_init(",
+     "summary": "Per-op bookkeeping: init the blob list and flags, add a resolved blob to the list, and at op end mark blobs dead and release leftovers.",
+     "details": "- `finish()` clears `blobs_live` first; leftover blobs are a warning and set `blob_error` to -EINVAL if none was set, then are put.\n- Returns `ctx->blob_error` for dispatch to fold into the op result.\n- Called around the op callback in device dispatch (patch 12)."
+    },
+    {
+     "title": "ctlv_blob_context_fail()",
+     "kind": "function",
+     "start": 331,
+     "end": 344,
+     "anchor": "/*",
+     "summary": "Records, if no error is set yet, a BAD_BLOB_DESCRIPTOR validation error pointing at the attribute and its parent.",
+     "details": "Offsets come from `ctlv_message_offset()` on the cursor, matching what schema validation would have reported."
+    },
+    {
+     "title": "ctlv_blob_acquire()",
+     "kind": "function",
+     "start": 346,
+     "end": 367,
+     "anchor": "static struct ctlv_blob *ctlv_blob_acquire(",
+     "summary": "Allocates a blob from a decoded descriptor and pins its VA backing.",
+     "details": "Reads address, length and type from the descriptor members. The type switch is not yet consulted: it always calls `ctlv_blob_va_acquire()`. Frees the blob on failure."
+    },
+    {
+     "title": "ctlv_blob_resolve()",
+     "kind": "function",
+     "start": 369,
+     "end": 396,
+     "anchor": "struct ctlv_blob *ctlv_blob_resolve(",
+     "summary": "Exported entry used by the generated resolve helpers: verifies the cursor, schema node and calling task, re-decodes the descriptor, acquires and tracks the blob.",
+     "details": "- Preconditions (cursor belongs to `ctx->request`, node is a blob, caller is the submitter with blobs live, descriptor already passed validation) are WARN_ON_ONCE checks returning -EINVAL.\n- Direction comes from the schema node.\n- On acquire failure the context error is filled via `ctlv_blob_context_fail()`; on success the blob is tracked on the op."
+    }
+   ]
+  },
+  {
+   "path": "drivers/ctlv/blob.h",
+   "purpose": "Core-internal interface of blob.c used by the dispatch code: per-op context init, tracking and finish.",
+   "units": [
+    {
+     "title": "Context hooks",
+     "kind": "function",
+     "start": 403,
+     "end": 417,
+     "anchor": "SPDX-License-Identifier",
+     "summary": "Declares `ctlv_blob_context_init/track/finish`, with opaque forward declarations of the blob and op context."
+    }
+   ]
+  },
+  {
+   "path": "drivers/ctlv/internal.h",
+   "purpose": "Private core definitions shared by the ctlv .c files, notably `struct ctlv_op_ctx`, the per-execution state.",
+   "units": [
+    {
+     "title": "Includes and task_struct forward declaration",
+     "kind": "text",
+     "start": 426,
+     "end": 434,
+     "anchor": "#include <linux/list.h>",
+     "summary": "Adds linux/list.h and a forward declaration of `struct task_struct` for the new ctx fields."
+    },
+    {
+     "title": "op_ctx: submitter",
+     "kind": "struct",
+     "start": 442,
+     "end": 443,
+     "anchor": "Compared against current",
+     "summary": "Adds `submitter`, the task that submitted the op, used only for identity comparison against `current`.",
+     "details": "It is const and never dereferenced, so it holds no reference. Set by dispatch (patch 12); checked by the blob code."
+    },
+    {
+     "title": "op_ctx: blob list and state",
+     "kind": "struct",
+     "start": 451,
+     "end": 453,
+     "anchor": "struct list_head blobs;",
+     "summary": "Adds the list of live blobs, the `blobs_live` flag and the sticky `blob_error`.",
+     "details": "Managed by `ctlv_blob_context_init/track/finish()`."
+    }
+   ]
+  },
+  {
+   "path": "include/linux/ctlv.h",
+   "purpose": "Public API header for CTLV families; this patch adds the blob accessors usable from family callbacks.",
+   "units": [
+    {
+     "title": "ctlv_blob_put() and ctlv_blob_len()",
+     "kind": "function",
+     "start": 465,
+     "end": 481,
+     "anchor": "struct ctlv_blob;",
+     "summary": "Opaque `struct ctlv_blob` and kernel-doc for releasing a blob and reading its length."
+    },
+    {
+     "title": "ctlv_blob_read() and ctlv_blob_write()",
+     "kind": "function",
+     "start": 483,
+     "end": 504,
+     "anchor": "/**",
+     "summary": "Kernel-doc and prototypes for offset-based copies out of an input blob and into an output blob."
+    }
+   ]
+  },
+  {
+   "path": "include/linux/ctlv_family.h",
+   "purpose": "Header for family implementers: builder/cursor helpers and macros that generated family headers instantiate. This patch adds blob resolve helpers.",
+   "units": [
+    {
+     "title": "ctlv_blob_resolve() declaration",
+     "kind": "function",
+     "start": 515,
+     "end": 516,
+     "anchor": "struct ctlv_blob *ctlv_blob_resolve(",
+     "summary": "Declares the core resolver that the generated helpers call."
+    },
+    {
+     "title": "CTLV_IN_BLOB()",
+     "kind": "macro",
+     "start": 524,
+     "end": 534,
+     "anchor": "#define CTLV_IN_BLOB(",
+     "summary": "Generates `<name>_resolve(ctx, nest)` for a named blob attribute inside a nest.",
+     "details": "Locates the attribute with `ctlv_input_attr()` and `<name>_ref()`, then calls `ctlv_blob_resolve()`. Used by generated headers, e.g. the attestation evidence blob."
+    },
+    {
+     "title": "CTLV_IN_EACH_BLOB()",
+     "kind": "macro",
+     "start": 542,
+     "end": 550,
+     "anchor": "#define CTLV_IN_EACH_BLOB(",
+     "summary": "Generates `<name>_resolve(ctx, attr)` for a cursor already positioned on an element of a repeated blob attribute.",
+     "details": "Returns ERR_PTR(-EINVAL) if the cursor is not at that attribute."
+    }
+   ]
+  }
+ ]
+}

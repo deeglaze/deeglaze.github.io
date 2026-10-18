@@ -1,0 +1,255 @@
+{
+ "patch": 18,
+ "title": "tdx-guest: Expose the native attestation service API",
+ "overview": "This patch refactors the TDX guest driver so that TDREPORT, Quote and RTMR operations are available as an in-kernel service (struct tdx_guest_ops) in addition to the existing misc ioctl, TSM report and TSM MR frontends, all sharing the same locks and buffers. It adds a one-client register/unregister interface in include/linux/tdx-guest.h that the TDX attestation family (patch 20) uses to attach to the device.",
+ "files": [
+  {
+   "path": "Documentation/virt/coco/tdx-guest.rst",
+   "purpose": "User documentation for the TDX guest driver; gains a section describing the kernel-client interface.",
+   "units": [
+    {
+     "title": "Kernel clients section",
+     "kind": "doc",
+     "start": 30,
+     "end": 46,
+     "anchor": "Kernel clients",
+     "summary": "Explains the single in-kernel client, its lifetime tied to the misc device, and attach/detach ordering.",
+     "details": "Registration attaches immediately if the service is ready, otherwise at the end of `tdx_guest_init()`; module exit and unregistration both call the client's remove callback before buffers are freed."
+    }
+   ]
+  },
+  {
+   "path": "MAINTAINERS",
+   "purpose": "Maintainer database entry for the TDX subsystem.",
+   "units": [
+    {
+     "title": "Add TDX guest files to the entry",
+     "kind": "text",
+     "start": 55,
+     "end": 57,
+     "anchor": "F:\tDocumentation/virt/coco/tdx-guest.rst",
+     "summary": "Lists the guest documentation, driver directory and new public header as maintained files."
+    }
+   ]
+  },
+  {
+   "path": "drivers/virt/coco/tdx-guest/tdx-guest.c",
+   "purpose": "The TDX guest platform driver: misc ioctl, TSM report (Quote) and TSM MR frontends over TDG.MR.REPORT, RTMR extend and the Quote protocol. This patch factors the core operations into lock-asserting helpers and layers the native client service over them.",
+   "units": [
+    {
+     "title": "Include tdx-guest.h",
+     "kind": "text",
+     "start": 69,
+     "end": 69,
+     "anchor": "#include <linux/tdx-guest.h>",
+     "summary": "Pulls in the new public service header."
+    },
+    {
+     "title": "Service state and length assertions",
+     "kind": "section",
+     "start": 77,
+     "end": 81,
+     "anchor": "static struct tdx_guest_info tdx_guest_info;",
+     "summary": "Adds the construction-info store, a forward declaration of the misc device, and compile-time checks that public and driver lengths agree."
+    },
+    {
+     "title": "Client registration state",
+     "kind": "section",
+     "start": 86,
+     "end": 90,
+     "anchor": "/* Serializes native client",
+     "summary": "client_lock protects the registered client, its private data and the tdx_service_ready flag.",
+     "details": "`tdx_service_ready` is set at the end of init and cleared at exit; a client is attached only when both a client and readiness exist."
+    },
+    {
+     "title": "__tdx_do_report() and tdx_do_report()",
+     "kind": "function",
+     "start": 100,
+     "end": 138,
+     "anchor": "static int __tdx_do_report(",
+     "summary": "Splits the TDREPORT call into a locked worker and an interruptible-lock wrapper.",
+     "details": "`__tdx_do_report()` asserts `mr_lock` is held, optionally copies in report data, issues `tdx_mcall_get_report0()`, and optionally copies the report out. `tdx_do_report()` keeps its old signature for the ioctl and TSM paths by taking `mr_lock` with `scoped_cond_guard(mutex_intr)`. Native callers use the worker directly with kernel sockptrs."
+    },
+    {
+     "title": "Device validation and info/report ops",
+     "kind": "function",
+     "start": 144,
+     "end": 175,
+     "anchor": "static bool tdx_guest_device_valid(",
+     "summary": "tdx_guest_device_valid() checks the device handle; info_get returns the cached info; report_get returns a fresh TDREPORT for the given report data.",
+     "details": "Every native op returns -ENODEV unless `dev` is `tdx_misc_dev.this_device`. `tdx_guest_report_get()` checks the report-data length and output capacity, then under `mr_lock` runs `__tdx_do_report()` and copies `tdx_report_buf` out."
+    },
+    {
+     "title": "tdx_guest_mr_read()",
+     "kind": "function",
+     "start": 177,
+     "end": 202,
+     "anchor": "static int tdx_guest_mr_read(",
+     "summary": "Reads MRTD or an RTMR by taking a fresh TDREPORT and copying the SHA-384 value at the register's report offset.",
+     "details": "The static offsets table maps `enum tdx_guest_mr` to the TDREPORT_* field offsets; the report is generated under `mr_lock` so the value is consistent with concurrent extends."
+    },
+    {
+     "title": "tdx_guest_rtmr_extend()",
+     "kind": "function",
+     "start": 204,
+     "end": 212,
+     "anchor": "static int tdx_guest_rtmr_extend(",
+     "summary": "Validates the device and RTMR index (0-3) and delegates to the existing tdx_do_extend()."
+    },
+    {
+     "title": "Capture construction fields in tdx_mr_init()",
+     "kind": "function",
+     "start": 221,
+     "end": 226,
+     "anchor": "memcpy(tdx_guest_info.mrconfigid,",
+     "summary": "After the initial report refresh, copies MRCONFIGID, MROWNER and MROWNERCONFIG into tdx_guest_info.",
+     "details": "These fields are immutable after TD construction, so `info_get` can serve them without issuing a TDCALL."
+    },
+    {
+     "title": "Quote length assertion",
+     "kind": "text",
+     "start": 234,
+     "end": 234,
+     "anchor": "static_assert(TDX_QUOTE_MAX_LEN",
+     "summary": "Ties the public Quote maximum to the driver's TDX_QUOTE_MAX_LEN."
+    },
+    {
+     "title": "__tdx_guest_quote_get() - signature and preconditions",
+     "kind": "function",
+     "start": 244,
+     "end": 257,
+     "anchor": "static int __tdx_guest_quote_get(",
+     "summary": "Converted from tdx_report_new_locked(): now a generic Quote worker taking report data and an output buffer, requiring quote_lock.",
+     "details": "Argument validation (report-data length, non-NULL outputs) moved here from the TSM-specific code so that both TSM and native callers share it."
+    },
+    {
+     "title": "__tdx_guest_quote_get() - report data source",
+     "kind": "function",
+     "start": 275,
+     "end": 276,
+     "anchor": "ret = tdx_do_report(KERNEL_SOCKPTR((void *)reportdata),",
+     "summary": "The TDREPORT for the Quote is now generated from the caller-supplied report data pointer."
+    },
+    {
+     "title": "__tdx_guest_quote_get() - copy out",
+     "kind": "function",
+     "start": 290,
+     "end": 293,
+     "anchor": "if (out_len > capacity)",
+     "summary": "Copies the Quote into the caller's buffer, bounded by capacity, instead of allocating a duplicate.",
+     "details": "The TSM caller allocates its own buffer; the native caller supplies one. `out_len` has already been checked against `TDX_QUOTE_MAX_LEN`."
+    },
+    {
+     "title": "tdx_guest_quote_get()",
+     "kind": "function",
+     "start": 301,
+     "end": 311,
+     "anchor": "static int tdx_guest_quote_get(",
+     "summary": "Native Quote op: validates the device, takes quote_lock interruptibly, and calls __tdx_guest_quote_get()."
+    },
+    {
+     "title": "tdx_report_new_locked() - TSM wrapper",
+     "kind": "function",
+     "start": 313,
+     "end": 332,
+     "anchor": "static int tdx_report_new_locked(",
+     "summary": "TSM report path rewritten as a thin wrapper that allocates a TDX_QUOTE_MAX_LEN buffer and calls the shared worker.",
+     "details": "Called from `tdx_report_new()` with `quote_lock` held. On success `report->outblob` takes ownership of the kvmalloc'd buffer sized to the actual Quote length; on error it is freed."
+    },
+    {
+     "title": "tdx_guest_ops table",
+     "kind": "const",
+     "start": 341,
+     "end": 347,
+     "anchor": "static const struct tdx_guest_ops tdx_guest_ops",
+     "summary": "Binds the native operations to the driver's implementations; this table is what the client receives in add()."
+    },
+    {
+     "title": "Client attach and detach",
+     "kind": "function",
+     "start": 349,
+     "end": 374,
+     "anchor": "static bool tdx_client_attached;",
+     "summary": "Internal helpers, under client_lock, that call client->add() with the misc device and client->remove() with the saved private data.",
+     "details": "`attach` is a no-op unless a client is registered and the service is ready; it records `tdx_client_priv` and `tdx_client_attached` on success. `detach` is a no-op when nothing is attached and always clears both."
+    },
+    {
+     "title": "tdx_guest_client_register()",
+     "kind": "function",
+     "start": 376,
+     "end": 391,
+     "anchor": "int tdx_guest_client_register(",
+     "summary": "Registers the single native client and attaches it immediately if the service is already ready.",
+     "details": "Requires both `add` and `remove`; a second registration gets -EBUSY. If attach fails, the registration is rolled back. Exported in the TDX_GUEST namespace."
+    },
+    {
+     "title": "tdx_guest_client_unregister()",
+     "kind": "function",
+     "start": 393,
+     "end": 401,
+     "anchor": "void tdx_guest_client_unregister(",
+     "summary": "Detaches (calling remove) and clears the registered client, warning if the descriptor does not match."
+    },
+    {
+     "title": "tdx_guest_init() - mark ready and attach",
+     "kind": "function",
+     "start": 410,
+     "end": 417,
+     "anchor": "scoped_guard(mutex, &client_lock) {",
+     "summary": "After TSM registration, flags the service ready and attaches any client registered earlier; failure unwinds.",
+     "details": "If attach fails `tdx_service_ready` is reset and init jumps to `unregister_tsm`."
+    },
+    {
+     "title": "tdx_guest_init() - new unwind label",
+     "kind": "function",
+     "start": 421,
+     "end": 422,
+     "anchor": "unregister_tsm:",
+     "summary": "Error label that unregisters the TSM report provider before the existing free_quote cleanup."
+    },
+    {
+     "title": "tdx_guest_exit() - detach client first",
+     "kind": "function",
+     "start": 430,
+     "end": 433,
+     "anchor": "scoped_guard(mutex, &client_lock) {",
+     "summary": "Removes the attached client and marks the service not ready before tearing down TSM, Quote buffer and misc device.",
+     "details": "This ordering ensures the client's remove callback runs before the report and Quote buffers are freed, as documented."
+    }
+   ]
+  },
+  {
+   "path": "include/linux/tdx-guest.h",
+   "purpose": "New in-kernel header defining the native TDX guest service: constants, construction info, the ops table the driver provides, and the client add/remove contract. Included by tdx-guest.c and by the attestation TDX provider.",
+   "units": [
+    {
+     "title": "Constants, tdx_guest_info and tdx_guest_mr",
+     "kind": "struct",
+     "start": 443,
+     "end": 468,
+     "anchor": "SPDX-License-Identifier",
+     "summary": "Length constants mirroring the UAPI/driver values, the immutable construction fields, and the readable MR identifiers.",
+     "details": "tdx-guest.c static_asserts that `TDX_GUEST_REPORTDATA_LEN`, `TDX_GUEST_REPORT_LEN` and `TDX_GUEST_QUOTE_MAX_LEN` equal the driver's own constants. `tdx_guest_info` holds MRCONFIGID, MROWNER and MROWNERCONFIG, captured once at init."
+    },
+    {
+     "title": "struct tdx_guest_ops",
+     "kind": "struct",
+     "start": 470,
+     "end": 490,
+     "anchor": "/**",
+     "summary": "Operations table the driver gives to its client: info, TDREPORT, Quote, MR read and RTMR extend.",
+     "details": "Each op takes the `struct device *` handed out in `add` as proof of lifetime; buffer-returning ops take an output pointer, a capacity and an out-length."
+    },
+    {
+     "title": "struct tdx_guest_client and registration API",
+     "kind": "struct",
+     "start": 492,
+     "end": 517,
+     "anchor": "/**",
+     "summary": "Client descriptor with add/remove callbacks and the register/unregister prototypes.",
+     "details": "`add()` returns client private data or an ERR_PTR; `remove()` receives that data. Only one client can be registered at a time."
+    }
+   ]
+  }
+ ]
+}

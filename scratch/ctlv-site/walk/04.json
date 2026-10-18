@@ -1,0 +1,203 @@
+{
+ "patch": 4,
+ "title": "Documentation: ctlv: Add userspace ABI",
+ "overview": "Documentation-only patch that publishes the CTLV userspace ABI as one RST document, links it into the userspace-api index and adds it to the CTLV MAINTAINERS entry. The document describes what the UAPI header (patch 2) defines, what the core (patches 5-12) implements and what the root family (patch 3) exposes; the family-writer guide follows in patch 13.",
+ "files": [
+  {
+   "path": "Documentation/userspace-api/ctlv.rst",
+   "purpose": "The normative userspace ABI for CTLV: devices, discovery, wire format, the single ioctl, queries, events, blobs, introspection and limits. It is prose and diagrams only; names come from include/uapi/linux/ctlv.h (patch 2) and the root family spec (patch 3), and behaviour from the core patches 5-12.",
+   "units": [
+    {
+     "title": "Title and introduction",
+     "kind": "doc",
+     "start": 25,
+     "end": 40,
+     "anchor": ".. SPDX-License-Identifier",
+     "summary": "States what CTLV is and what the document covers: one char device per instance, one ioctl, read() for events.",
+     "details": "Points to Documentation/ctlv/specs for per-family contents and to the driver-api guide (patch 13) for family authors. The YAML-to-generator flow is patch 1 (generator) and patch 3 (generated root family)."
+    },
+    {
+     "title": "Why a TLV transport",
+     "kind": "section",
+     "start": 42,
+     "end": 56,
+     "anchor": "Why a TLV transport",
+     "summary": "Rationale: one ioctl for all operations, optional/required attributes, unknown-attribute policy and pre-callback validation.",
+     "details": "The validation promised here is done by message input handling (patch 5) and the schema validator (patch 7) before the dispatch in patch 12 invokes a family callback."
+    },
+    {
+     "title": "Devices and access modes",
+     "kind": "section",
+     "start": 58,
+     "end": 77,
+     "anchor": "Devices",
+     "summary": "Each instance is a /dev/ctlvN node in the ctlv class; the open mode determines observation versus full-control authority.",
+     "details": "- O_RDONLY is observation, O_RDWR full control, O_WRONLY gives -EACCES.\n- Per-operation authority is `read` or `read-write`; events are available to both.\n- Event subscriptions and queues are per open file description (patch 10); the open path and class registration are in patch 12."
+    },
+    {
+     "title": "Discovery and udev matching",
+     "kind": "section",
+     "start": 79,
+     "end": 128,
+     "anchor": "Discovery",
+     "summary": "Uevents carry CTLV_FAMILY and numbered CTLV_COMPATIBLE_n properties, with a listen-before-enumerate procedure and udev rule examples.",
+     "details": "- The compatible list is the family ancestry from the root; indices never move, so reparenting a family is an ABI break.\n- families-dump on an open fd is the authoritative answer; uevent properties serve pre-open matching only.\n- The properties are emitted by the device registration code in patch 12."
+    },
+    {
+     "title": "Wire format - attribute header and rules",
+     "kind": "section",
+     "start": 130,
+     "end": 177,
+     "anchor": "Wire format",
+     "summary": "Defines struct ctlv_attr (len, flags, attr_id), 8-byte alignment, how len and padding nest, the root attribute, scalar encodings and the depth limit.",
+     "details": "Mirrors struct ctlv_attr, CTLV_ALIGN, CTLV_ATTR_F_NESTED and CTLV_ATTR_ROOT in the UAPI header (patch 2). Parsing and bounds checks of these rules are in the input path (patch 5); output building is patch 8."
+    },
+    {
+     "title": "Wire format - worked message example",
+     "kind": "section",
+     "start": 179,
+     "end": 211,
+     "anchor": "A whole message with every offset",
+     "summary": "A complete 120-byte request with offsets and a nested diagram, showing that padding is counted by the parent's len and never by a leaf's own.",
+     "details": "Walking a nest's children advances by CTLV_ALIGN(child.len); walking a single payload advances by child.len."
+    },
+    {
+     "title": "Attribute and operation IDs",
+     "kind": "section",
+     "start": 213,
+     "end": 230,
+     "anchor": "An attribute ID names the family",
+     "summary": "64-bit IDs pack family, group and attribute (operations: family and op), built with the CTLV_ATTR and CTLV_OP macros.",
+     "details": "These macros are in the UAPI header (patch 2); the per-family complete IDs are produced by the generator (patch 1), e.g. for the root family in patch 3."
+    },
+    {
+     "title": "Request occurrence order",
+     "kind": "section",
+     "start": 232,
+     "end": 239,
+     "anchor": "Request occurrence order",
+     "summary": "Occurrences of one attribute ID must be contiguous in a nest; an ignored unknown attribute ends a run.",
+     "details": "Enforced by the schema validator (patch 7)."
+    },
+    {
+     "title": "Attributes a kernel may skip",
+     "kind": "section",
+     "start": 241,
+     "end": 260,
+     "anchor": "Attributes a kernel may skip",
+     "summary": "CTLV_ATTR_F_IGNORE_IF_UNKNOWN lets a request carry attributes an older kernel has never heard of, without weakening validation of known IDs.",
+     "details": "- Applies only to requests, never to the root, replies or events.\n- An ID the schema declares elsewhere is still validated, so the bit forgives only complete IDs unknown to every family of the device.\n- Callers use op-schema-get to learn which attributes were understood. Implemented in patch 7."
+    },
+    {
+     "title": "Executing an operation - ioctl structure",
+     "kind": "section",
+     "start": 262,
+     "end": 294,
+     "anchor": "Executing an operation",
+     "summary": "The single ioctl CTLV_IOC_OP_EXEC and struct ctlv_op_exec, with the meaning of request_len/reply_len as copy boundaries and the request-root requirement.",
+     "details": "- The struct and ioctl number are in the UAPI header (patch 2); handling is in patches 5, 8 and 12.\n- reserved[] must be zero for compatible growth; generation and cursor are for queries only.\n- request-max-len from ops-dump is computed from the known schema; unknown ignorable attributes may exceed it up to the 1 MiB transport limit."
+    },
+    {
+     "title": "Operation kinds",
+     "kind": "section",
+     "start": 296,
+     "end": 309,
+     "anchor": "The three kinds of operation",
+     "summary": "Distinguishes action, query and event operations by what they answer.",
+     "details": "Kinds are declared in the family YAML and surfaced by ops-dump; dispatch is in patch 12."
+    },
+    {
+     "title": "Errors",
+     "kind": "section",
+     "start": 311,
+     "end": 365,
+     "anchor": "Errors",
+     "summary": "Describes the TLV error information written to the reply buffer and the meaning of each errno returned by the ioctl and by read().",
+     "details": "The error TLV uses the validation-reason and related attributes of the root family (patch 3), written by the output code (patch 8). The errno is authoritative if the buffer is too small."
+    },
+    {
+     "title": "Queries and fragments",
+     "kind": "section",
+     "start": 367,
+     "end": 412,
+     "anchor": "Queries and fragments",
+     "summary": "Explains multi-call query replies using generation and cursor, FRAG_MORE on the root and open nests, and reassembly.",
+     "details": "- First call has generation and cursor zero; a nonzero returned cursor means more to come.\n- Continuations must repeat op_id and request; a stale generation gives -ESTALE.\n- Readers must reject non-progress or a repeated cursor. The fragmenting writer is in the output patch (8)."
+    },
+    {
+     "title": "Events - subscription, record format and queue",
+     "kind": "section",
+     "start": 414,
+     "end": 455,
+     "anchor": "Events",
+     "summary": "Events are subscribed per file description, read as one record (header plus one root) per read(), with sequence numbers and overflow reporting.",
+     "details": "- struct ctlv_event_hdr is in the UAPI header (patch 2); queue, sequence numbering and event-overflow records are in patch 10.\n- Subscriptions use the subscriptions-add/remove actions and queue size is managed by event-queue-get/set from the root family (patch 3)."
+    },
+    {
+     "title": "Events - root family events",
+     "kind": "section",
+     "start": 457,
+     "end": 466,
+     "anchor": "Two events come from the root family",
+     "summary": "Documents op-changed and device-removed, the two events defined by the root family.",
+     "details": "op-changed carries the same state generation as ops-dump so clients can order dump against event (patch 11); device-removed is emitted at unregistration (patch 12)."
+    },
+    {
+     "title": "Blobs",
+     "kind": "section",
+     "start": 468,
+     "end": 487,
+     "anchor": "Blobs",
+     "summary": "Large data is passed by blob descriptor (backing type, length, identifier); only the anonymous userspace VA backing is defined, with lifetime and aliasing rules.",
+     "details": "Descriptor validation is patch 6 and VA acquire/release around the callback is patch 9. Caller must not touch input blobs, or access output/inout blobs, while the operation is in flight."
+    },
+    {
+     "title": "Introspection",
+     "kind": "section",
+     "start": 489,
+     "end": 518,
+     "anchor": "Introspection",
+     "summary": "The core answers families-dump, ops-dump and op-schema-get on every device so a program can discover a device without compile-time knowledge.",
+     "details": "- The queries are defined in the root family (patch 3) and implemented by the introspection code (patch 11).\n- Recursive schemas are reported with schema.reenters, counting how many levels up the re-entered level is.\n- ops-dump lengths include descendant-family additions, so callers should ask rather than compute."
+    },
+    {
+     "title": "Limits",
+     "kind": "section",
+     "start": 520,
+     "end": 531,
+     "anchor": "Limits",
+     "summary": "Implementation limits for message size, error length, nesting, default query buffer and event queue.",
+     "details": "Stated as implementation limits rather than wire maxima so raising them later is compatible. The constants are CTLV_MAX_INLINE_MESSAGE_LEN, CTLV_MAX_ERROR_LEN, CTLV_MAX_NEST_DEPTH, CTLV_DEFAULT_QUERY_REPLY_LEN and CTLV_MAX_EVENT_QUEUE_LEN in the UAPI header (patch 2)."
+    }
+   ]
+  },
+  {
+   "path": "Documentation/userspace-api/index.rst",
+   "purpose": "Userspace-API table of contents; gains an entry so the new document is built and reachable.",
+   "units": [
+    {
+     "title": "Add ctlv to the Devices and I/O toctree",
+     "kind": "build",
+     "start": 537,
+     "end": 543,
+     "anchor": ":maxdepth: 1",
+     "summary": "Inserts `ctlv` between ocxl and dma-buf-heaps in the toctree."
+    }
+   ]
+  },
+  {
+   "path": "MAINTAINERS",
+   "purpose": "Maintainer database; the existing CTLV entry is extended to cover the new document.",
+   "units": [
+    {
+     "title": "CTLV entry covers the ABI document",
+     "kind": "config",
+     "start": 549,
+     "end": 555,
+     "anchor": "linux-kernel@vger.kernel.org",
+     "summary": "Adds Documentation/userspace-api/ctlv.rst to the F: patterns of the CTLV maintainers entry."
+    }
+   ]
+  }
+ ]
+}

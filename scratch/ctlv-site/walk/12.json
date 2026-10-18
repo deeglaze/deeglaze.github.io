@@ -1,0 +1,601 @@
+{
+ "patch": 12,
+ "title": "ctlv: Add device and operation dispatch",
+ "overview": "This patch adds drivers/ctlv/core.c, the layer that turns a family descriptor chain into a registered character device and dispatches validated ioctl operations to family callbacks. It builds on the earlier schema, message, blob, builder and event layers and exposes ctlv_create()/ctlv_destroy() plus op-state helpers to family drivers. The Kconfig and Makefile changes enable CONFIG_CTLV and link core.o with the generated root family.",
+ "files": [
+  {
+   "path": "drivers/Kconfig",
+   "purpose": "Top-level driver Kconfig; now sources the CTLV menu.",
+   "units": [
+    {
+     "title": "Hook drivers/ctlv/ into drivers/Kconfig",
+     "kind": "config",
+     "start": 32,
+     "end": 33,
+     "anchor": "source \"drivers/ctlv/Kconfig\"",
+     "summary": "Adds a source line for the ctlv Kconfig between connector and firmware."
+    }
+   ]
+  },
+  {
+   "path": "drivers/Makefile",
+   "purpose": "Top-level driver build rules.",
+   "units": [
+    {
+     "title": "Build drivers/ctlv/ under CONFIG_CTLV",
+     "kind": "build",
+     "start": 45,
+     "end": 45,
+     "anchor": "obj-$(CONFIG_CTLV)",
+     "summary": "Descends into `ctlv/` when `CONFIG_CTLV` is set."
+    }
+   ]
+  },
+  {
+   "path": "drivers/ctlv/Makefile",
+   "purpose": "Kbuild rules for the CTLV core module.",
+   "units": [
+    {
+     "title": "Add core.o and the generated root family object",
+     "kind": "build",
+     "start": 57,
+     "end": 60,
+     "anchor": "ctlv-y",
+     "summary": "Links `core.o` and the generated `ctlv_gen.o` into `ctlv.o`.",
+     "details": "`ctlv_gen.o` supplies the root family descriptor that `core.c` references as `ctlv_family`."
+    }
+   ]
+  },
+  {
+   "path": "drivers/ctlv/core.c",
+   "purpose": "Core of CTLV: owns device creation and teardown, family chain validation and op table resolution, per-device family priv storage, ioctl op dispatch, the character-device file operations, uevents and the module init. It calls the schema, message, blob and event layers; family drivers call in through `ctlv_create()`, `ctlv_destroy()` and the op provide/state helpers.",
+   "units": [
+    {
+     "title": "Header, includes",
+     "kind": "section",
+     "start": 67,
+     "end": 106,
+     "anchor": "// SPDX",
+     "summary": "License, pr_fmt and the includes core.c needs for cdev, IDA, rwsem and uaccess work."
+    },
+    {
+     "title": "Device limit and ABI layout asserts",
+     "kind": "const",
+     "start": 108,
+     "end": 123,
+     "anchor": "enum {",
+     "summary": "Caps the number of devices and pins the uapi struct sizes and alignment at build time.",
+     "details": "`CTLV_MAX_DEVICES` sizes both the chrdev region and the IDA range. The `static_assert`s guarantee one layout for `ctlv_attr`, `ctlv_op_exec` and `ctlv_event_hdr` on every ABI including compat, which is why `compat_ioctl` can be `compat_ptr_ioctl`."
+    },
+    {
+     "title": "Device number, IDA and family priv containers",
+     "kind": "struct",
+     "start": 125,
+     "end": 148,
+     "anchor": "static dev_t ctlv_device_number",
+     "summary": "Global device-number base and ID allocator, plus the per-family private-data bookkeeping types.",
+     "details": "- `ctlv_priv_container` sits immediately before each family's priv, cache-aligned, and links parent and child privs of one device.\n- `ctlv_family_priv` records, per chain level, the family, its priv pointer and offset, pending init_info and whether `init` succeeded."
+    },
+    {
+     "title": "Family claim registry",
+     "kind": "struct",
+     "start": 150,
+     "end": 158,
+     "anchor": "/* Claims persist",
+     "summary": "A global list that binds a family name to its numeric ID for the life of the core module.",
+     "details": "Claims outlive family module unload so an ID can never later name a different family. Protected by `ctlv_family_claims_lock`."
+    },
+    {
+     "title": "ctlv_family_claim_add()",
+     "kind": "function",
+     "start": 160,
+     "end": 190,
+     "anchor": "static int ctlv_family_claim_add(",
+     "summary": "Records a family name/ID pair, accepting an identical repeat and rejecting a conflicting one.",
+     "details": "Called from `ctlv_create()`. Same ID and same name returns 0; a clash on either alone returns -EEXIST. New claims are kept on `ctlv_family_claims`."
+    },
+    {
+     "title": "ctlv_family_claims_free()",
+     "kind": "function",
+     "start": 192,
+     "end": 201,
+     "anchor": "static void ctlv_family_claims_free(",
+     "summary": "Frees every claim at module exit.",
+     "details": "Only called from `ctlv_module_exit()`."
+    },
+    {
+     "title": "Family validation: error helpers",
+     "kind": "function",
+     "start": 203,
+     "end": 225,
+     "anchor": "/*",
+     "summary": "Small helpers that log and return -EINVAL for a malformed family or op descriptor.",
+     "details": "Generated tables should never fail these checks; they exist because an out-of-tree family may come from a different generator."
+    },
+    {
+     "title": "ctlv_family_chain_check()",
+     "kind": "function",
+     "start": 227,
+     "end": 254,
+     "anchor": "/*",
+     "summary": "Walks from a family up to the core family checking the parent chain, registry ordering and naming rule.",
+     "details": "Each child's name must be its parent's full name plus '-suffix', and parent IDs must be lower than child IDs. The chain must terminate at `&ctlv_family`."
+    },
+    {
+     "title": "ctlv_family_descriptor_check()",
+     "kind": "function",
+     "start": 256,
+     "end": 289,
+     "anchor": "/* One descriptor",
+     "summary": "Checks one descriptor in the chain for completeness of its hooks, lifecycle callbacks and extension-point fills.",
+     "details": "Requires a pre/post pair, `priv_size`/`init`/`fini`, no stray claim of the root ID, and that `stub_ops` match the schema's `stub_fill_schemas` one for one."
+    },
+    {
+     "title": "ctlv_family_descriptors_check() and ctlv_family_check()",
+     "kind": "function",
+     "start": 291,
+     "end": 317,
+     "anchor": "/* Every descriptor binds",
+     "summary": "Top-level family validation: chain shape first, then each descriptor.",
+     "details": "Called from `ctlv_op_resolution_init()` before any allocation."
+    },
+    {
+     "title": "Family priv lookup and free",
+     "kind": "function",
+     "start": 319,
+     "end": 337,
+     "anchor": "static struct ctlv_family_priv *ctlv_family_priv_find(",
+     "summary": "Finds a family's priv slot on a device and releases the priv bookkeeping.",
+     "details": "`ctlv_family_priv_find()` is also used by op resolution and stub lookup. `ctlv_family_privs_free()` is safe to call on partial setup and is reused by the release and error paths."
+    },
+    {
+     "title": "ctlv_family_privs_alloc()",
+     "kind": "function",
+     "start": 339,
+     "end": 396,
+     "anchor": "static int ctlv_family_privs_alloc(",
+     "summary": "Lays out one cache-aligned block holding every chain level's priv and links parent/child containers.",
+     "details": "- First pass sizes each level with overflow-checked arithmetic, ordered oldest ancestor first (index 0 is the core).\n- Second pass, after a single `kvzalloc`, aligns the block and wires the `parent`/`child` pointers that `ctlv_priv_parent()`/`ctlv_priv_child()` follow."
+    },
+    {
+     "title": "Priv lifecycle: pre_init",
+     "kind": "function",
+     "start": 398,
+     "end": 417,
+     "anchor": "static int ctlv_family_privs_pre_init(",
+     "summary": "Threads init_info from the device family up through each ancestor's `pre_init` transform.",
+     "details": "Iterates from the device family towards the core; each level may translate the info for its parent, and the chain must consume it fully by the end."
+    },
+    {
+     "title": "Priv lifecycle: pre_fini",
+     "kind": "function",
+     "start": 419,
+     "end": 434,
+     "anchor": "static void ctlv_family_privs_pre_fini(",
+     "summary": "Runs `pre_fini` on initialized levels, oldest first, with all device locks released.",
+     "details": "The lockdep assertions encode that `pre_fini` may block on consumers and so must not run under registration, transition or events locks."
+    },
+    {
+     "title": "Priv lifecycle: init and fini_only",
+     "kind": "function",
+     "start": 436,
+     "end": 467,
+     "anchor": "static void ctlv_family_privs_fini_only(",
+     "summary": "Initializes levels core-first and unwinds in reverse; `fini_only` is also the teardown step.",
+     "details": "`initialized` marks which levels have run `init` so a mid-chain failure only finalizes those."
+    },
+    {
+     "title": "Priv lifecycle: post_init",
+     "kind": "function",
+     "start": 469,
+     "end": 484,
+     "anchor": "static int ctlv_family_privs_post_init(",
+     "summary": "Runs `post_init` hooks from the device family up to the core after ops are published.",
+     "details": "Failure leaves cleanup to `ctlv_device_fini()` in `ctlv_create()`'s error path."
+    },
+    {
+     "title": "ctlv_device_fini()",
+     "kind": "function",
+     "start": 486,
+     "end": 499,
+     "anchor": "static void ctlv_device_fini(",
+     "summary": "Quiesces a device: drains consumers, stops event contexts and finalizes family privs.",
+     "details": "Order: `pre_fini`, mark `destroying` and stop event contexts under `transition_lock`, wait for contexts, mark the event layer dead, then `fini` each level."
+    },
+    {
+     "title": "Op resolution: state and family accounting",
+     "kind": "struct",
+     "start": 501,
+     "end": 542,
+     "anchor": "/* What one walk of the chain",
+     "summary": "Tracks one walk over the effective schema while binding ops to family callbacks.",
+     "details": "`ctlv_op_resolution_family_bound()` checks that all of a family's bindings were consumed; `ctlv_op_resolution_family_enter()` runs it when the walk moves to the next owner family."
+    },
+    {
+     "title": "ctlv_op_resolution_add() - identity and ordering",
+     "kind": "function",
+     "start": 544,
+     "end": 568,
+     "anchor": "static int ctlv_op_resolution_add(",
+     "summary": "Starts filling one `ctlv_op_entry`: priv, state slot, and op ID ownership and ordering.",
+     "details": "Op IDs encode family and number; the walk from ancestor to descendant must strictly ascend, which also makes IDs unique and lets `ctlv_op_find()` stop early."
+    },
+    {
+     "title": "ctlv_op_resolution_add() - type handling",
+     "kind": "function",
+     "start": 569,
+     "end": 604,
+     "anchor": "switch (op->type) {",
+     "summary": "Validates and binds actions, queries and events.",
+     "details": "- Action/query: checks fd access, takes the next binding from the owner family, requires a callback and consistent pre/post hooks, sets `absent` for optional ops.\n- Event: no fd access, not optional, assigned a subscription `event_index`."
+    },
+    {
+     "title": "ctlv_op_resolution_add() - availability and sizes",
+     "kind": "function",
+     "start": 606,
+     "end": 630,
+     "anchor": "switch (op->availability) {",
+     "summary": "Assigns dynamic ops a per-device state bit and computes the op's message size limits.",
+     "details": "Dynamic ops index into the `disabled` bitmap; `ctlv_schema_op_sizes()` is evaluated once per device against the target family's filled extension points."
+    },
+    {
+     "title": "ctlv_op_resolution_init()",
+     "kind": "function",
+     "start": 632,
+     "end": 679,
+     "anchor": "static int ctlv_op_resolution_init(",
+     "summary": "Builds the device's sorted op table from the effective schema of the family chain.",
+     "details": "Validates the family, allocates privs, counts ops via the schema cursor, allocates `ctlvdev->ops` and fills it in a second walk, then records dynamic and event counts."
+    },
+    {
+     "title": "Priv and device accessors (exported)",
+     "kind": "function",
+     "start": 681,
+     "end": 701,
+     "anchor": "void *ctlv_priv_parent(",
+     "summary": "Public helpers to navigate parent/child family privs and reach the backing device.",
+     "details": "Consumed by family modules through the `CTLV` symbol namespace."
+    },
+    {
+     "title": "ctlv_op_find() and ctlv_op_disabled()",
+     "kind": "function",
+     "start": 703,
+     "end": 728,
+     "anchor": "/*",
+     "summary": "Looks up an op by ID in the ID-sorted table and tests its dynamic-disable bit.",
+     "details": "The disabled test uses an acquire load, pairing with the fully ordered bit updates in `ctlv_device_op_state_set()`. Dispatch takes no lock for it."
+    },
+    {
+     "title": "ctlv_op_publish_all()",
+     "kind": "function",
+     "start": 730,
+     "end": 745,
+     "anchor": "static void ctlv_op_publish_all(",
+     "summary": "Drops ops that no family opted into and freezes the table.",
+     "details": "Compacts the array in place under `transition_lock` and sets `published`, after which lookups see a stable table."
+    },
+    {
+     "title": "ctlv_device_op_provide()",
+     "kind": "function",
+     "start": 747,
+     "end": 761,
+     "anchor": "void ctlv_device_op_provide(",
+     "summary": "Lets a family opt an optional op in before publication.",
+     "details": "Only valid before publish and not during destroy; clears `absent` on the entry. Backs the `CTLV_OP_PROVIDE()` macro."
+    },
+    {
+     "title": "ctlv_device_op_state_set()",
+     "kind": "function",
+     "start": 763,
+     "end": 794,
+     "anchor": "void ctlv_device_op_state_set(",
+     "summary": "Enables or disables a dynamic op and announces the change to event subscribers.",
+     "details": "Serialized by `transition_lock`; a no-op change returns early, and after publication it bumps `state_generation` and calls `ctlv_event_op_changed()` while still holding the lock so queues see ordered records. Backs `CTLV_OP_ENABLE()`/`CTLV_OP_DISABLE()`."
+    },
+    {
+     "title": "Op execution: mode check and reply sizing",
+     "kind": "function",
+     "start": 796,
+     "end": 819,
+     "anchor": "static int ctlv_op_check_mode(",
+     "summary": "Checks the open file mode against the op's fd access and gives the minimum reply size for an op.",
+     "details": "Events cannot be executed. READ_WRITE ops need both modes on the descriptor."
+    },
+    {
+     "title": "Request framing and validation",
+     "kind": "function",
+     "start": 821,
+     "end": 855,
+     "anchor": "/*",
+     "summary": "Checks the root attribute frame and validates the request against the op's request schema.",
+     "details": "`ctlv_request_frame()` sets `CTLV_VALIDATION_REASON_MALFORMED_MESSAGE` on a bad frame; `ctlv_request_validate()` then runs `ctlv_schema_validate()` and leaves an index in `ctx->request` that is freed by `ctlv_op_exec()`."
+    },
+    {
+     "title": "ctlv_reply_capacity()",
+     "kind": "function",
+     "start": 857,
+     "end": 868,
+     "anchor": "/*",
+     "summary": "Chooses the reply buffer size: schema maximum for actions, caller's length for queries.",
+     "details": "Returns 0 when the op has no reply schema."
+    },
+    {
+     "title": "Reply completion checks",
+     "kind": "function",
+     "start": 870,
+     "end": 900,
+     "anchor": "/* Actions and final query fragments",
+     "summary": "Verifies after the callback that the built reply is complete and schema-valid.",
+     "details": "Queries mid-stream (cursor outstanding) skip full validation; a successful query callback must have ended exactly one fragment."
+    },
+    {
+     "title": "ctlv_op_call()",
+     "kind": "function",
+     "start": 902,
+     "end": 931,
+     "anchor": "static int ctlv_op_call(",
+     "summary": "Invokes the bound action or query callback with request and reply cursors and finalizes blob handling.",
+     "details": "Wraps the call in `ctlv_blob_context_init()`/`ctlv_blob_context_finish()` and then runs `ctlv_reply_finish()` on success."
+    },
+    {
+     "title": "ctlv_op_dispatch()",
+     "kind": "function",
+     "start": 933,
+     "end": 972,
+     "anchor": "/*",
+     "summary": "Applies the family-level and op-level pre/post hooks around the availability check and the call.",
+     "details": "Core-family ops use the core hooks and priv; others use the device family's. Hook order is family pre, op pre, call (or -EOPNOTSUPP if disabled), op post, family post."
+    },
+    {
+     "title": "ctlv_error_info()",
+     "kind": "function",
+     "start": 974,
+     "end": 1020,
+     "anchor": "/* Error information",
+     "summary": "Replaces the reply with an error-info message describing a validation or callback failure, if it fits.",
+     "details": "Builds a separate buffer using `ctlv_error_info_schema`; stale-generation errors carry generations, others carry offsets and a missing attr ID. The errno stays authoritative."
+    },
+    {
+     "title": "ctlv_op_exec() - lookup and argument checks",
+     "kind": "function",
+     "start": 1022,
+     "end": 1069,
+     "anchor": "/*",
+     "summary": "Resolves the op and checks mode, resume fields and reply length before touching any buffers.",
+     "details": "Only queries accept `generation`/`cursor`; a too-small reply buffer is rejected up front so nothing is mutated."
+    },
+    {
+     "title": "ctlv_op_exec() - snapshot, dispatch, reply",
+     "kind": "function",
+     "start": 1071,
+     "end": 1121,
+     "anchor": "void *snapshot __free(kvfree)",
+     "summary": "Copies and validates the request, allocates the reply, dispatches and hands the reply to the caller.",
+     "details": "The request is snapshotted so hooks never read userspace. On success `exec->generation` and `exec->cursor` are updated and `*reply` takes ownership of the buffer; on failure error info may replace it."
+    },
+    {
+     "title": "ctlv_stub_ops_find()",
+     "kind": "function",
+     "start": 1123,
+     "end": 1145,
+     "anchor": "/* What one family of this device's chain",
+     "summary": "Finds the family in this device's chain that filled a given extension point.",
+     "details": "Searches from the device family towards the core and returns that family's stub ops and priv."
+    },
+    {
+     "title": "ctlv_stub_fill()",
+     "kind": "function",
+     "start": 1147,
+     "end": 1187,
+     "anchor": "int ctlv_stub_fill(",
+     "summary": "Delegates an extension-point output nest to the family that filled it.",
+     "details": "Called from generated helpers. It rebinds the request cursor to the fill schema's members when a request is present, then invokes the stub's `fill` callback."
+    },
+    {
+     "title": "Core family callbacks",
+     "kind": "function",
+     "start": 1189,
+     "end": 1216,
+     "anchor": "/*",
+     "summary": "No-op hooks and lifecycle callbacks the core supplies for the generated root family descriptor.",
+     "details": "`ctlv_init()` only asserts the core has no init_info and no parent priv."
+    },
+    {
+     "title": "ctlv_file_ioctl()",
+     "kind": "function",
+     "start": 1218,
+     "end": 1253,
+     "anchor": "static long ctlv_file_ioctl(",
+     "summary": "Handles `CTLV_IOC_OP_EXEC`: copies the exec struct, runs the op under the registration read lock and copies results out.",
+     "details": "Takes `registration_lock` for read, so `ctlv_destroy()` waits for admitted callbacks. Reply copy-out happens after the lock is dropped; only `generation` and `cursor` are written back into the user struct."
+    },
+    {
+     "title": "ctlv_file_read() and ctlv_file_poll()",
+     "kind": "function",
+     "start": 1255,
+     "end": 1271,
+     "anchor": "/*",
+     "summary": "Event delivery entry points that forward to the event layer.",
+     "details": "Read returns one record per call; both delegate to `ctlv_event_file_read()`/`ctlv_event_file_poll()` in event.c."
+    },
+    {
+     "title": "File open admission helpers",
+     "kind": "function",
+     "start": 1273,
+     "end": 1281,
+     "anchor": "static bool ctlv_file_open_allowed(",
+     "summary": "Predicate that the device is registered and has a family.",
+     "details": "Must be called with the registration read lock held."
+    },
+    {
+     "title": "ctlv_file_open()",
+     "kind": "function",
+     "start": 1283,
+     "end": 1327,
+     "anchor": "static int ctlv_file_open(",
+     "summary": "Admits an open: pins the device, allocates a per-file context and initializes its event queue.",
+     "details": "Takes a device reference first so a failed create cannot free storage under a waiting open. The reference is kept by the file and released in `ctlv_file_release()`."
+    },
+    {
+     "title": "ctlv_file_release()",
+     "kind": "function",
+     "start": 1329,
+     "end": 1338,
+     "anchor": "static int ctlv_file_release(",
+     "summary": "Tears down the per-file event state and drops the device reference.",
+     "details": "Counterpart of `ctlv_file_open()`."
+    },
+    {
+     "title": "File operations table",
+     "kind": "struct",
+     "start": 1340,
+     "end": 1349,
+     "anchor": "static const struct file_operations",
+     "summary": "Wires the char-device entry points to the functions above.",
+     "details": "`owner` is the core module, not the family's, so an open file does not hold a family module."
+    },
+    {
+     "title": "Uevent family identity",
+     "kind": "function",
+     "start": 1351,
+     "end": 1371,
+     "anchor": "/* Uevent identity is available",
+     "summary": "Emits `CTLV_FAMILY` and a `CTLV_COMPATIBLE_<n>` list of the chain's names, plus a count.",
+     "details": "Gives udev rules the family chain before the node can be opened."
+    },
+    {
+     "title": "ctlv_device_uevent_check()",
+     "kind": "function",
+     "start": 1373,
+     "end": 1390,
+     "anchor": "static int ctlv_device_uevent_check(",
+     "summary": "Dry-runs the uevent environment at create time to catch names too long for a uevent.",
+     "details": "Run before a minor is allocated; returns -E2BIG with a diagnostic if limits are exceeded."
+    },
+    {
+     "title": "ctlv_device_uevent() and release",
+     "kind": "function",
+     "start": 1392,
+     "end": 1412,
+     "anchor": "/* Read unlocked",
+     "summary": "Class uevent callback and the device release callback.",
+     "details": "Uevent reads `family` with `READ_ONCE` without the registration lock. Release frees the IDA slot, disabled bitmap, privs, ops and the device itself."
+    },
+    {
+     "title": "Device class",
+     "kind": "struct",
+     "start": 1414,
+     "end": 1418,
+     "anchor": "static struct class ctlv_device_class",
+     "summary": "Class under which every CTLV device node appears.",
+     "details": "Registered in `ctlv_module_init()`."
+    },
+    {
+     "title": "ctlv_device_add() and ctlv_device_del()",
+     "kind": "function",
+     "start": 1420,
+     "end": 1430,
+     "anchor": "static int ctlv_device_add(",
+     "summary": "Thin wrappers around `cdev_device_add()` and `cdev_device_del()`.",
+     "details": "Add requires the registration write lock to be held."
+    },
+    {
+     "title": "ctlv_create() - allocation and resolution",
+     "kind": "function",
+     "start": 1432,
+     "end": 1467,
+     "anchor": "struct ctlv_device *ctlv_create(",
+     "summary": "Allocates the device and resolves ops, event sizes, the uevent check and the disabled bitmap.",
+     "details": "Exported entry point for family drivers. Failures here use the plain `err_free` path since `device_initialize()` has not run."
+    },
+    {
+     "title": "ctlv_create() - registration and unwind",
+     "kind": "function",
+     "start": 1468,
+     "end": 1523,
+     "anchor": "devnum = ida_alloc_max(",
+     "summary": "Allocates a minor, initializes the device, runs the family lifecycle and publishes the device.",
+     "details": "- After `device_initialize()`, errors use `put_device()` (release callback frees storage).\n- Order: claim add, pre_init, init, publish ops, start event contexts, post_init, then `cdev_device_add()` under the write lock and set `registered`.\n- `err_fini` runs `ctlv_device_fini()` first."
+    },
+    {
+     "title": "ctlv_destroy()",
+     "kind": "function",
+     "start": 1525,
+     "end": 1551,
+     "anchor": "void ctlv_destroy(",
+     "summary": "Unregisters the device, waits out admitted callbacks, finalizes the family and drops the device.",
+     "details": "Removes the node, clears `registered` under the write lock (draining in-flight ioctls), runs `ctlv_device_fini()`, then detaches family pointers so no callback can reach family-owned state."
+    },
+    {
+     "title": "Module init and exit",
+     "kind": "function",
+     "start": 1553,
+     "end": 1583,
+     "anchor": "static int __init ctlv_module_init(",
+     "summary": "Reserves the char-device region and registers the class; exit reverses it and frees claims and the IDA.",
+     "details": "Registered at `subsys_initcall` so family drivers can create devices at their init."
+    }
+   ]
+  },
+  {
+   "path": "drivers/ctlv/device.h",
+   "purpose": "Private definition of `struct ctlv_device`, shared among core.c and event.c.",
+   "units": [
+    {
+     "title": "struct ctlv_device additions",
+     "kind": "struct",
+     "start": 1589,
+     "end": 1629,
+     "anchor": "#ifndef",
+     "summary": "Adds the cdev, registration lock, family priv array and op availability state to the device.",
+     "details": "- `registration_lock` (rwsem) guards `registered` and `family`; ioctls read-lock it, create/destroy write-lock it.\n- `transition_lock` serializes op publication and state writers; dispatch never takes it.\n- `disabled` is the bitmap of dynamic ops."
+    }
+   ]
+  },
+  {
+   "path": "include/linux/ctlv.h",
+   "purpose": "Public API for CTLV users; this patch adds device lifecycle and priv navigation.",
+   "units": [
+    {
+     "title": "Priv navigation and device create/destroy API",
+     "kind": "function",
+     "start": 1638,
+     "end": 1681,
+     "anchor": "/**",
+     "summary": "Declares kernel-doc for priv parent/child, backing device, `ctlv_create()` and `ctlv_destroy()`."
+    },
+    {
+     "title": "ctlv_stub_fill() declaration",
+     "kind": "function",
+     "start": 1688,
+     "end": 1698,
+     "anchor": "/**",
+     "summary": "Declares the extension-point delegation helper used by generated code."
+    }
+   ]
+  },
+  {
+   "path": "include/linux/ctlv_family.h",
+   "purpose": "Interface between the core and family modules.",
+   "units": [
+    {
+     "title": "Op provide and state-set declarations",
+     "kind": "function",
+     "start": 1710,
+     "end": 1713,
+     "anchor": "void ctlv_device_op_provide",
+     "summary": "Exports the family-facing functions for optional-op opt-in and dynamic enable/disable."
+    },
+    {
+     "title": "CTLV_OP_PROVIDE/ENABLE/DISABLE macros",
+     "kind": "macro",
+     "start": 1721,
+     "end": 1738,
+     "anchor": "#define CTLV_OP_PROVIDE",
+     "summary": "Generates per-op inline wrappers `<name>_provide/_enable/_disable` around the two functions.",
+     "details": "Generated headers instantiate these with each op's ID."
+    }
+   ]
+  }
+ ]
+}

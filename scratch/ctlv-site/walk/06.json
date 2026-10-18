@@ -1,0 +1,94 @@
+{
+ "patch": 6,
+ "title": "ctlv: Prepare blob descriptor validation",
+ "overview": "Adds the helper that parses a blob descriptor (the nested type/address/fd/offset/length attribute group) out of a request and checks it against the blob limits of the schema node. It sits above message.h's iteration primitives and is used both by schema validation (patch 7) and by VA blob acquisition (patch 9). It is built into ctlv.o but CONFIG_CTLV stays unwired.",
+ "files": [
+  {
+   "path": "drivers/ctlv/Makefile",
+   "purpose": "Kbuild fragment for the ctlv module object; this patch only adds one more object.",
+   "units": [
+    {
+     "title": "Build blob_desc.o into ctlv.o",
+     "kind": "build",
+     "start": 30,
+     "end": 31,
+     "anchor": "ctlv-y += message.o",
+     "summary": "Adds blob_desc.o to the ctlv-y object list."
+    }
+   ]
+  },
+  {
+   "path": "drivers/ctlv/blob_desc.c",
+   "purpose": "Parses a blob descriptor attribute into a struct ctlv_blob_desc and validates it against a node schema's blob limits. It uses the message iterator from message.h and reports failures as validation reasons for the caller to surface.",
+   "units": [
+    {
+     "title": "Header and includes",
+     "kind": "section",
+     "start": 38,
+     "end": 53,
+     "anchor": "// SPDX-License-Identifier: GPL-2.0-only",
+     "summary": "License header, includes of UAPI and local message/blob headers."
+    },
+    {
+     "title": "ctlv_blob_member()",
+     "kind": "function",
+     "start": 55,
+     "end": 71,
+     "anchor": "static int ctlv_blob_member(",
+     "summary": "Maps a blob attribute ID to its member index, or -1 for an unknown ID."
+    },
+    {
+     "title": "ctlv_blob_desc_read()",
+     "kind": "function",
+     "start": 73,
+     "end": 101,
+     "anchor": "u32 ctlv_blob_desc_read(",
+     "summary": "Walks the children of a blob attribute and decodes each into the descriptor, returning a validation reason on the first problem.",
+     "details": "- Uses `ctlv_message_next()` to iterate children.\n- Each child must carry no flags other than nesting, must not be nested, must be a known member, must have an 8-byte payload, and must not repeat.\n- `*bad` points to the offending child on failure and is NULL on success or on a framing error of the iterator.\n- Callers: schema validation (patch 7) and VA blob acquisition (patch 9)."
+    },
+    {
+     "title": "ctlv_blob_variant()",
+     "kind": "function",
+     "start": 103,
+     "end": 117,
+     "anchor": "static u32 ctlv_blob_variant(",
+     "summary": "Checks that the set of present members is exactly what the descriptor's declared type requires.",
+     "details": "Type and length are always required. Only the VA type is accepted here, which additionally requires an address; any other type is rejected as a bad descriptor."
+    },
+    {
+     "title": "ctlv_blob_desc_check()",
+     "kind": "function",
+     "start": 119,
+     "end": 139,
+     "anchor": "u32 ctlv_blob_desc_check(",
+     "summary": "Validates a decoded descriptor against the node's allowed backings, length limit and alignment, with an overflow check on the range.",
+     "details": "- The node's `blob.backings` bitmask must include the descriptor type.\n- Length must be nonzero and at most `blob.max_len`.\n- The start (address, or offset for non-address variants) must meet `blob.alignment`, and start plus length must not overflow u64."
+    }
+   ]
+  },
+  {
+   "path": "drivers/ctlv/blob_desc.h",
+   "purpose": "Private header declaring the decoded blob descriptor and its two entry points. Included by schema validation and by blob acquisition code.",
+   "units": [
+    {
+     "title": "Descriptor members and struct ctlv_blob_desc",
+     "kind": "struct",
+     "start": 146,
+     "end": 169,
+     "anchor": "/* SPDX-License-Identifier: GPL-2.0-only */",
+     "summary": "Defines the member indices and a decoded descriptor holding one u64 per member plus a presence bitmask.",
+     "details": "- Member order mirrors the blob attributes of the root family.\n- `present` has bit `BIT(member)` set for each attribute seen, so duplicates and missing members can be detected."
+    },
+    {
+     "title": "Prototypes and header guard end",
+     "kind": "function",
+     "start": 170,
+     "end": 174,
+     "anchor": "u32 ctlv_blob_desc_read(",
+     "summary": "Declares ctlv_blob_desc_read() and ctlv_blob_desc_check().",
+     "details": "Both return 0 or a `CTLV_VALIDATION_REASON_*` code rather than an errno."
+    }
+   ]
+  }
+ ]
+}

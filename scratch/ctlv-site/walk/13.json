@@ -1,0 +1,191 @@
+{
+ "patch": 13,
+ "title": "Documentation: ctlv: Describe how to write a family",
+ "overview": "Adds the driver-API guide for writing a CTLV family: the YAML specification, generated descriptors and callbacks, device lifecycle, operations, hooks, blobs, events and extension through inheritance. It is written against the code of the core (device create/destroy, dispatch, blobs, events) and the generator under tools/ctlv; index.rst and MAINTAINERS wire it into the docs tree and the CTLV entry.",
+ "files": [
+  {
+   "path": "Documentation/driver-api/ctlv.rst",
+   "purpose": "Tutorial-style reference using an invented family, ctlv-example, to walk through every step of implementing a family. Names the generated-code conventions that the generator (tools/ctlv) emits and the core APIs in include/linux/ctlv.h.",
+   "units": [
+    {
+     "title": "Title and introduction",
+     "kind": "doc",
+     "start": 25,
+     "end": 39,
+     "anchor": ".. SPDX-License-Identifier",
+     "summary": "States that a family is a YAML spec plus callbacks named by its generated header, and that CTLV validates requests before callbacks run.",
+     "details": "Points to the userspace ABI document and Documentation/ctlv/specs."
+    },
+    {
+     "title": "Registry and generation workflow",
+     "kind": "doc",
+     "start": 40,
+     "end": 61,
+     "anchor": "Add the specification, registry entry",
+     "summary": "Explains the three files changed per family and the make targets that regenerate and verify outputs.",
+     "details": "families.yaml is append-only because the index is the family ID baked into attribute and operation IDs. Generation is done by tools/ctlv; generated files must never be hand-edited."
+    },
+    {
+     "title": "Write the specification",
+     "kind": "spec",
+     "start": 63,
+     "end": 109,
+     "anchor": "Write the specification",
+     "summary": "Example YAML: family header, attr-groups (uint, string, blob, nested list) and attr-sets that assemble messages.",
+     "details": "family flags (post-init, pre-fini) select which lifecycle callbacks are generated; attr sets define the required and optional members of a message level, implemented by the schema tables in drivers/ctlv/schema.c."
+    },
+    {
+     "title": "Operations in the example spec",
+     "kind": "spec",
+     "start": 110,
+     "end": 130,
+     "anchor": "ops:",
+     "summary": "Declares an optional action, a dynamic query with pre/post hooks, and an event, and states that attribute payload forms are exclusive.",
+     "details": "Types action, query and event correspond to the dispatch in drivers/ctlv core and to event.c; availability: dynamic ties to the disable/enable state."
+    },
+    {
+     "title": "Inheritance: parent stub",
+     "kind": "doc",
+     "start": 132,
+     "end": 154,
+     "anchor": "Inheritance and extension points",
+     "summary": "Explains that descendants implement only their own ops and that a parent reserves an extension point with an empty stub set.",
+     "details": "Stubs are the ctlv_stub_schema entries that introspection.c and the validator resolve with ctlv_schema_fill()."
+    },
+    {
+     "title": "Inheritance: child fill and parent usage",
+     "kind": "doc",
+     "start": 155,
+     "end": 200,
+     "anchor": "A child fills that same set:",
+     "summary": "Shows a child family filling the stub, the parent opening the nest and calling ctlv_stub_fill(), and the generated fill callback.",
+     "details": "An unfilled stub contributes no nest or length, so neither family names the other."
+    },
+    {
+     "title": "Create a device and provider descriptors",
+     "kind": "doc",
+     "start": 202,
+     "end": 237,
+     "anchor": "Create and destroy a device",
+     "summary": "Shows ctlv_create() with the leaf descriptor and init info, and how pre_init supplies a static descriptor to the parent.",
+     "details": "pre_init runs leaf to root and must return immutable storage or ERR_PTR; the leaf init_info goes only to the leaf's init."
+    },
+    {
+     "title": "Creation and destruction order",
+     "kind": "doc",
+     "start": 239,
+     "end": 267,
+     "anchor": "Each family supplies",
+     "summary": "Gives the precise ordering of pre_init, init, freezing of ops, post_init, and the destroy sequence (pre_fini, event drain, fini), including init-failure behaviour.",
+     "details": "Corresponds to ctlv_create()/ctlv_destroy() in the device code; ops are frozen and event admission starts between init and post_init."
+    },
+    {
+     "title": "Family privs",
+     "kind": "doc",
+     "start": 269,
+     "end": 279,
+     "anchor": "CTLV allocates one zeroed",
+     "summary": "Describes the per-family priv, and ctlv_priv_parent()/ctlv_priv_child() with their validity at each lifecycle stage."
+    },
+    {
+     "title": "Implementing an action",
+     "kind": "doc",
+     "start": 281,
+     "end": 305,
+     "anchor": "Implement operations",
+     "summary": "Shows an action callback using generated getters and ctlv_op_error().",
+     "details": "Getters read only validated placements; _present() and _for_each() handle optional and repeated attributes."
+    },
+    {
+     "title": "Implementing a query",
+     "kind": "doc",
+     "start": 307,
+     "end": 335,
+     "anchor": "Query",
+     "summary": "Shows a fragmenting query with a generation and cursor, using ctlv_op_query_more/done and -ESTALE.",
+     "details": "Same cursor/generation contract that introspection.c (patch 11) follows; cursors must be nonzero and advance, and each fragment completes a logical leaf."
+    },
+    {
+     "title": "Hooks and availability",
+     "kind": "doc",
+     "start": 337,
+     "end": 363,
+     "anchor": "Hooks and availability",
+     "summary": "Defines the order of family and operation hooks around a callback and the difference between optional (provide) and dynamic (disable/enable) ops.",
+     "details": "Disabled ops stay discoverable via the ops dump and return -EOPNOTSUPP; state changes emit op-changed."
+    },
+    {
+     "title": "Blobs",
+     "kind": "doc",
+     "start": 365,
+     "end": 382,
+     "anchor": "Blobs",
+     "summary": "Shows resolving a blob attribute, reading it and releasing it within the callback.",
+     "details": "The schema fixes direction, backing, length and alignment; implemented by blob.c and blob_desc.c."
+    },
+    {
+     "title": "Events: emit and abort",
+     "kind": "doc",
+     "start": 384,
+     "end": 403,
+     "anchor": "Events",
+     "summary": "Shows creating, filling and emitting an event, and the context rules.",
+     "details": "One of emit or abort must end each context; GFP flag covers subscriber copies; no hooks around events. Implemented in event.c."
+    },
+    {
+     "title": "Events: reporting a lost event",
+     "kind": "doc",
+     "start": 405,
+     "end": 431,
+     "anchor": "If hardware changed before",
+     "summary": "Explains ctlv_event_lost() for events that happened but could not be built, with an example and the accounting it performs.",
+     "details": "It advances event sequence and aggregates into the preallocated EVENT_OVERFLOW record; it neither allocates nor sleeps."
+    },
+    {
+     "title": "Reporting an error",
+     "kind": "doc",
+     "start": 433,
+     "end": 440,
+     "anchor": "Reporting an error",
+     "summary": "Distinguishes a callback's errno return from the error information CTLV itself writes into the reply when it rejects a message."
+    },
+    {
+     "title": "Configuration",
+     "kind": "config",
+     "start": 442,
+     "end": 446,
+     "anchor": "Configuration",
+     "summary": "Documents CONFIG_CTLV, selected by family implementations."
+    }
+   ]
+  },
+  {
+   "path": "Documentation/driver-api/index.rst",
+   "purpose": "Driver-API documentation index.",
+   "units": [
+    {
+     "title": "Add ctlv to the toctree",
+     "kind": "doc",
+     "start": 453,
+     "end": 458,
+     "anchor": "early-userspace/index",
+     "summary": "Registers the new page in the driver-api toctree."
+    }
+   ]
+  },
+  {
+   "path": "MAINTAINERS",
+   "purpose": "Maintainer database; the CTLV entry already covers the CTLV paths.",
+   "units": [
+    {
+     "title": "Add the document to the CTLV entry",
+     "kind": "text",
+     "start": 464,
+     "end": 471,
+     "anchor": "L:\tlinux-kernel",
+     "summary": "Adds the new driver-api page to the CTLV F: patterns."
+    }
+   ]
+  }
+ ]
+}

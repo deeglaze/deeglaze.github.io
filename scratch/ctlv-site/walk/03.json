@@ -1,0 +1,440 @@
+{
+ "patch": 3,
+ "title": "ctlv: Add the root family specification and generated files",
+ "overview": "Defines the root CTLV family (ID 0) that every device answers: its YAML spec is the source of truth, with the registry, generated-file manifest and ABI snapshot around it. The three generated headers carry the UAPI constants and kernel API, and the generated source holds the const schema tables and the ctlv_family descriptor; the descriptor is preparatory and only linked once the handlers arrive with device and operation dispatch.",
+ "files": [
+  {
+   "path": "Documentation/ctlv/abi/ctlv.yaml",
+   "purpose": "Checked-in ABI snapshot of the root family, written by `make -C tools/ctlv abi-update`. The checker (tools/ctlv) compares the live spec against it, so any UAPI change shows up as a reviewed diff here; it records only IDs, types and bounds, not comments.",
+   "units": [
+    {
+     "title": "Snapshot header, family and enums",
+     "kind": "spec",
+     "start": 43,
+     "end": 64,
+     "anchor": "# SPDX-License-Identifier",
+     "summary": "Explains the snapshot's role and freezes the family ID and enum numbering.",
+     "details": "Enum values are numbered from 1 in spec order. Removing or renumbering anything here is an ABI break regardless of the file contents afterwards."
+    },
+    {
+     "title": "Attr groups: family, blob, error",
+     "kind": "spec",
+     "start": 65,
+     "end": 89,
+     "anchor": "attr-groups:",
+     "summary": "Frozen attr IDs and types of the family, blob and error groups.",
+     "details": "Group IDs are 1..6 in spec order; attr IDs are 1-based within a group. Bounds such as `max-length: 63` on the family name are part of the snapshot."
+    },
+    {
+     "title": "Attr groups: op, schema, event",
+     "kind": "spec",
+     "start": 90,
+     "end": 135,
+     "anchor": "  op:",
+     "summary": "Frozen attr IDs and bounds of the op, schema and event groups.",
+     "details": "`schema.attrs`/`optional-attrs` are nested and unlimited because schema nodes recurse; `event.queue-len` carries its unit and range."
+    },
+    {
+     "title": "Attr sets",
+     "kind": "spec",
+     "start": 136,
+     "end": 147,
+     "anchor": "attr-sets:",
+     "summary": "Frozen numbering of the eleven named attr sets.",
+     "details": "Sets are the message shapes; their member lists live in the ops section below as the effective request/reply trees."
+    },
+    {
+     "title": "Ops: dumps and op-schema-get",
+     "kind": "spec",
+     "start": 148,
+     "end": 206,
+     "anchor": "ops:",
+     "summary": "Frozen op IDs 1..3 with their effective reply trees.",
+     "details": "The reply trees are expanded from attr sets. `reenters: schema-node` marks the recursive back-reference instead of unrolling the tree further."
+    },
+    {
+     "title": "Ops: subscriptions, event queue, events",
+     "kind": "spec",
+     "start": 207,
+     "end": 228,
+     "anchor": "  subscriptions-add:",
+     "summary": "Frozen op IDs 4..10: subscription and queue actions/queries plus the three event ops.",
+     "details": "Events have no fd-access; `device-removed` has an empty reply tree."
+    }
+   ]
+  },
+  {
+   "path": "Documentation/ctlv/abi/families.registry.yaml",
+   "purpose": "ABI baseline of the ordered family registry, updated deliberately by abi-update; guards against reordering or removing family names.",
+   "units": [
+    {
+     "title": "Registry baseline",
+     "kind": "spec",
+     "start": 235,
+     "end": 241,
+     "anchor": "# SPDX-License-Identifier",
+     "summary": "Lists the single registered family, ctlv, whose position (0) is its family ID."
+    }
+   ]
+  },
+  {
+   "path": "Documentation/ctlv/families.yaml",
+   "purpose": "Append-only registry of CTLV family names whose index is the wire family ID; input of ctlv_families_gen.h.",
+   "units": [
+    {
+     "title": "Family registry",
+     "kind": "spec",
+     "start": 248,
+     "end": 260,
+     "anchor": "# SPDX-License-Identifier",
+     "summary": "Declares the registry rules and registers the root family at index 0.",
+     "details": "Entries can be deprecated but never reordered, removed or renamed; every entry needs specs/<name>.yaml."
+    }
+   ]
+  },
+  {
+   "path": "Documentation/ctlv/generated-files.yaml",
+   "purpose": "Manifest telling the regeneration tool (tools/ctlv/ctlv-regen.sh) which spec produces which generated outputs, so drift can be detected.",
+   "units": [
+    {
+     "title": "Generated-file manifest",
+     "kind": "config",
+     "start": 267,
+     "end": 283,
+     "anchor": "# SPDX-License-Identifier",
+     "summary": "Maps the registry to its UAPI header and the ctlv spec to its UAPI header, kernel header and kernel source.",
+     "details": "Paths match the files added in this patch."
+    }
+   ]
+  },
+  {
+   "path": "Documentation/ctlv/specs/ctlv.yaml",
+   "purpose": "The authoritative YAML specification of the root family (ID 0). Every CTLV device answers these ops in addition to its own family's, and the blob and error groups are reused inside all other families' messages. All generated files and the ABI snapshot derive from it.",
+   "units": [
+    {
+     "title": "Header and family declaration",
+     "kind": "spec",
+     "start": 290,
+     "end": 301,
+     "anchor": "# SPDX-License-Identifier",
+     "summary": "States the root family's role: ID 0, inherits nothing, everything here is append-only.",
+     "details": "Every other family name begins with `ctlv-`."
+    },
+    {
+     "title": "Enums",
+     "kind": "enum",
+     "start": 303,
+     "end": 344,
+     "anchor": "enums:",
+     "summary": "Defines op-type, op-availability, blob-type, blob-direction, validation-reason and op-fd-access.",
+     "details": "validation-reason enumerates the failures reported in the error group; availability is a permission (fixed/dynamic) while the current state is `op.disabled`."
+    },
+    {
+     "title": "Attr groups: family, blob, error",
+     "kind": "spec",
+     "start": 346,
+     "end": 396,
+     "anchor": "attr-groups:",
+     "summary": "The family-entry record, the blob descriptor nest and the error-information attrs.",
+     "details": "blob is the descriptor nest of every blob attr in any family (only `va`/address is used now). error attrs are all optional and describe only the first failure."
+    },
+    {
+     "title": "Attr group: op",
+     "kind": "spec",
+     "start": 398,
+     "end": 429,
+     "anchor": "  # One entry per effective op",
+     "summary": "Per-op record returned by ops-dump and op-changed events.",
+     "details": "Length members not applicable to an op type are omitted; `state-generation` advances per op state change on a device."
+    },
+    {
+     "title": "Attr group: schema",
+     "kind": "spec",
+     "start": 431,
+     "end": 495,
+     "anchor": "  # One node of an op's request",
+     "summary": "Describes one node of an op's request/reply tree for op-schema-get.",
+     "details": "`attrs` and `optional-attrs` are recursive nests of schema-node; `reenters` points back up the tree to avoid unbounded expansion; kind and unit carry values of ctlv_schema_kind / ctlv_unit."
+    },
+    {
+     "title": "Attr group: event",
+     "kind": "spec",
+     "start": 497,
+     "end": 516,
+     "anchor": "  - name: event",
+     "summary": "Attrs for subscriptions, event queue sizing and overflow reporting.",
+     "details": "`op-id` may repeat up to 256 times per request; queue lengths are in bytes, 1..16 MiB."
+    },
+    {
+     "title": "Attr sets: entries and schema node",
+     "kind": "spec",
+     "start": 518,
+     "end": 561,
+     "anchor": "attr-sets:",
+     "summary": "Message shapes for family/op entries, op-schema-request and schema-node.",
+     "details": "A set lists required `attrs` and `optional-attrs` drawn from groups as group.attr."
+    },
+    {
+     "title": "Attr sets: info and event shapes",
+     "kind": "spec",
+     "start": 563,
+     "end": 603,
+     "anchor": "  # The two trees of one op",
+     "summary": "Shapes for schema info, change info, error info and the event messages.",
+     "details": "error-info has only optional attrs because only the first failure's description is present."
+    },
+    {
+     "title": "Ops: query and schema ops",
+     "kind": "spec",
+     "start": 605,
+     "end": 628,
+     "anchor": "ops:",
+     "summary": "The three read-only queries: families-dump, ops-dump, op-schema-get.",
+     "details": "Queries read an fd with `fd-access: read`; op-schema-get takes an op ID and returns request/reply trees."
+    },
+    {
+     "title": "Ops: actions and events",
+     "kind": "spec",
+     "start": 630,
+     "end": 668,
+     "anchor": "  - name: subscriptions-add",
+     "summary": "Subscription and queue actions plus the op-changed, event-overflow and device-removed events.",
+     "details": "Op order here defines the op IDs 1..10. device-removed has no payload."
+    }
+   ]
+  },
+  {
+   "path": "drivers/ctlv/ctlv_gen.c",
+   "purpose": "Generated kernel source for the root family (from specs/ctlv.yaml via ctlv-regen.sh). It holds the const schema tables the core validates messages against, the op descriptor table, and the ctlv_family descriptor. Preparatory: it is built once the handlers it names arrive with device and operation dispatch. `_CTLV_GENERATED_METADATA_ONLY` suppresses the accessor macros in the kernel header.",
+   "units": [
+    {
+     "title": "Header, includes",
+     "kind": "section",
+     "start": 675,
+     "end": 690,
+     "anchor": "// SPDX-License-Identifier",
+     "summary": "Generated-file banner and includes; defines metadata-only mode before including the family headers."
+    },
+    {
+     "title": "Node schemas: families-dump and ops-dump",
+     "kind": "const",
+     "start": 691,
+     "end": 719,
+     "anchor": "static const struct ctlv_node_schema families_dump_request",
+     "summary": "Flattened per-message node-schema arrays for the first two queries.",
+     "details": "Each array starts with a ROOT node (counts of members and positions) followed by the nest and leaf nodes in preorder; leaf macros give min/max or string bounds."
+    },
+    {
+     "title": "Node schemas: op-schema-get",
+     "kind": "const",
+     "start": 721,
+     "end": 768,
+     "anchor": "static const struct ctlv_node_schema op_schema_get_request",
+     "summary": "Request (op id) and reply schema arrays for op-schema-get.",
+     "details": "The reply repeats the schema-node member list under both request and reply nests; NEST_REENTERS entries express the recursion via index back-references instead of infinite expansion."
+    },
+    {
+     "title": "Node schemas: subscriptions, queue and events",
+     "kind": "const",
+     "start": 770,
+     "end": 811,
+     "anchor": "static const struct ctlv_node_schema subscriptions_add_request",
+     "summary": "Schema arrays for the remaining request, reply and event trees.",
+     "details": "Empty trees are a lone ROOT(0,0,0) node."
+    },
+    {
+     "title": "Error-info schema tree",
+     "kind": "const",
+     "start": 813,
+     "end": 830,
+     "anchor": "static const struct ctlv_node_schema error_info",
+     "summary": "Schema for the error-information message and the tree wrapper exported to the core.",
+     "details": "`ctlv_error_info_schema` is used by the core when building failure replies; static_assert ties the computed max length 432 to CTLV_MAX_ERROR_LEN."
+    },
+    {
+     "title": "Op schema table",
+     "kind": "const",
+     "start": 832,
+     "end": 862,
+     "anchor": "/* The ops this family declares",
+     "summary": "Per-op descriptors in declaration order binding each op ID to access, availability, length limits and its request/reply trees.",
+     "details": "QUERY/ACTION/EVENT macros take computed max lengths; `CTLV_SCHEMA_TREE_NONE()` marks ops without a reply."
+    },
+    {
+     "title": "Family schema and generated limit guards",
+     "kind": "const",
+     "start": 864,
+     "end": 879,
+     "anchor": "/* The family ID is its position",
+     "summary": "Family-level schema (name, ID 0, ops) and compile-time checks of generated maxima against core limits.",
+     "details": "The asserts confirm uevent cost, inline message length, event queue length and nest depth fit the core's compile-time limits."
+    },
+    {
+     "title": "Op bindings and family descriptor",
+     "kind": "const",
+     "start": 881,
+     "end": 903,
+     "anchor": "/* Local action and query bindings",
+     "summary": "Binds the seven action/query handlers and the lifecycle hooks into the exported `ctlv_family`.",
+     "details": "Handlers (`ctlv_*_query/_action`, `ctlv_op_pre/post`, `ctlv_priv_size`, `ctlv_init/fini`) are declared in include/linux/ctlv_gen.h and implemented later by the core. Events have no bindings. Exported in the CTLV namespace."
+    }
+   ]
+  },
+  {
+   "path": "include/linux/ctlv_gen.h",
+   "purpose": "Generated kernel header for the root family: declares the schema symbols, the handler prototypes the core must implement, and (outside metadata-only mode) typed accessors for reading requests and writing replies and events.",
+   "units": [
+    {
+     "title": "Header, includes, schema declarations",
+     "kind": "section",
+     "start": 910,
+     "end": 934,
+     "anchor": "/* SPDX-License-Identifier",
+     "summary": "Banner, includes and extern declarations of the op schema table, family schema and error-info schema.",
+     "details": "CTLV_ERROR_INFO_MAX_LEN is the generated worst-case error message size."
+    },
+    {
+     "title": "Handler prototypes",
+     "kind": "function",
+     "start": 936,
+     "end": 950,
+     "anchor": "/* Implemented by the CTLV core",
+     "summary": "Prototypes of the seven query/action handlers declared by the family.",
+     "details": "All share the signature (priv, op ctx, request cursor, reply cursor)."
+    },
+    {
+     "title": "Hooks, lifecycle and descriptor",
+     "kind": "function",
+     "start": 952,
+     "end": 961,
+     "anchor": "/* Root-family hooks",
+     "summary": "Declares pre/post hooks around every core op, priv-size/init/fini lifecycle and the exported ctlv_family.",
+     "details": "Defined by the core and referenced from ctlv_gen.c's descriptor."
+    },
+    {
+     "title": "Request readers",
+     "kind": "macro",
+     "start": 963,
+     "end": 983,
+     "anchor": "#ifndef _CTLV_GENERATED_METADATA_ONLY",
+     "summary": "Accessor macros generated per request attr for handlers to read validated messages.",
+     "details": "CTLV_IN_REF names the attr within the op's request tree (`&ctlv_op_schemas[N].request`); HAS/U64/FOR_EACH variants follow its occurrence limits."
+    },
+    {
+     "title": "Reply writers",
+     "kind": "macro",
+     "start": 985,
+     "end": 1038,
+     "anchor": "/* Writing a reply",
+     "summary": "One put or nest-start helper per attr of the family, typed by schema kind.",
+     "details": "Generated mechanically for every attr in every group in spec order; PUT_U64/S64/BOOL/STRING append atomically, NEST_START opens a nest closed by ctlv_nest_end()."
+    },
+    {
+     "title": "Event builders and header end",
+     "kind": "macro",
+     "start": 1040,
+     "end": 1046,
+     "anchor": "/* Building one event",
+     "summary": "CTLV_EVENT_CREATE helpers for the three events, then the closing guards.",
+     "details": "An event built this way is passed once to ctlv_event_emit() or ctlv_event_abort()."
+    }
+   ]
+  },
+  {
+   "path": "include/uapi/linux/ctlv_families_gen.h",
+   "purpose": "Generated UAPI header from the family registry: numeric family IDs.",
+   "units": [
+    {
+     "title": "Family number enum",
+     "kind": "enum",
+     "start": 1053,
+     "end": 1067,
+     "anchor": "/* SPDX-License-Identifier",
+     "summary": "Defines enum _ctlv_family with CTLV_FAMILY_ROOT = 0, the position of ctlv in families.yaml.",
+     "details": "Included by ctlv_gen.h and used in the CTLV_ATTR/CTLV_OP encodings."
+    }
+   ]
+  },
+  {
+   "path": "include/uapi/linux/ctlv_gen.h",
+   "purpose": "Generated UAPI header for the root family: enums, group, attr, set and op ID constants userspace and kernel use to build and parse messages. The wire format (CTLV_ATTR, CTLV_OP macros) lives in <linux/ctlv.h>; attr IDs here encode family, group and attr via those macros.",
+   "units": [
+    {
+     "title": "Header and includes",
+     "kind": "section",
+     "start": 1074,
+     "end": 1089,
+     "anchor": "/* SPDX-License-Identifier",
+     "summary": "Banner, include guard and includes of the wire format and family-number headers."
+    },
+    {
+     "title": "Spec enums",
+     "kind": "enum",
+     "start": 1090,
+     "end": 1135,
+     "anchor": "/* enum op-type */",
+     "summary": "One C enum per spec enum, values continuing from 1.",
+     "details": "Mirror the enums in specs/ctlv.yaml and the ABI snapshot."
+    },
+    {
+     "title": "Attr groups and attr ID macros base",
+     "kind": "enum",
+     "start": 1137,
+     "end": 1147,
+     "anchor": "/* attr groups */",
+     "summary": "Group numbering and the `_CTLV_ATTR` helper placing attrs under CTLV_FAMILY_ROOT.",
+     "details": "Each group uses the pattern: per-group helper macro, enum of 1-based attr numbers (underscore-prefixed), then public CTLV_ATTR_* macros wrapping them."
+    },
+    {
+     "title": "Attrs of groups family and blob",
+     "kind": "enum",
+     "start": 1149,
+     "end": 1177,
+     "anchor": "/* attrs of group family */",
+     "summary": "Attr numbers and public IDs for the family and blob groups."
+    },
+    {
+     "title": "Attrs of groups error and op",
+     "kind": "enum",
+     "start": 1179,
+     "end": 1229,
+     "anchor": "/* attrs of group error */",
+     "summary": "Attr numbers and public IDs for the error and op groups."
+    },
+    {
+     "title": "Attrs of group schema",
+     "kind": "enum",
+     "start": 1231,
+     "end": 1274,
+     "anchor": "/* attrs of group schema */",
+     "summary": "Attr numbers and public IDs for the schema group."
+    },
+    {
+     "title": "Attrs and metadata of group event",
+     "kind": "enum",
+     "start": 1276,
+     "end": 1301,
+     "anchor": "/* attrs of group event */",
+     "summary": "Event group attr IDs plus unit/scale metadata constants for the byte-valued queue attrs."
+    },
+    {
+     "title": "Attr set IDs",
+     "kind": "enum",
+     "start": 1303,
+     "end": 1316,
+     "anchor": "/* attr sets */",
+     "summary": "Numbers for the eleven named attr sets."
+    },
+    {
+     "title": "Op IDs and closing guard",
+     "kind": "enum",
+     "start": 1318,
+     "end": 1344,
+     "anchor": "/* ops */",
+     "summary": "Op numbering 1..10 and public CTLV_OP_* macros composed with the root family ID.",
+     "details": "These IDs match the ABI snapshot and index ctlv_op_schemas[] in order after subtracting one."
+    }
+   ]
+  }
+ ]
+}

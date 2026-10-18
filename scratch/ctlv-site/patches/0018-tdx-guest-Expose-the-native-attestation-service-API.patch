@@ -1,0 +1,520 @@
+From 639a42987b36852de2813ce35d221d730467c709 Mon Sep 17 00:00:00 2001
+From: Jiri Pirko <jiri@nvidia.com>
+Date: Thu, 15 Oct 2026 16:50:51 +0200
+Subject: [PATCH 18/20] tdx-guest: Expose the native attestation service API
+
+Share TDREPORT, Quote and measurement-register operations with one
+in-kernel client while preserving the existing misc, TSM report and TSM
+MR interfaces. Tie clients to service initialization and removal.
+
+Assisted-by: Cursor: GPT-5.6 Sol
+Assisted-by: Cursor: Claude Opus 5.5
+Signed-off-by: Jiri Pirko <jiri@nvidia.com>
+---
+ Documentation/virt/coco/tdx-guest.rst   |  18 ++
+ MAINTAINERS                             |   3 +
+ drivers/virt/coco/tdx-guest/tdx-guest.c | 258 +++++++++++++++++++++---
+ include/linux/tdx-guest.h               |  75 +++++++
+ 4 files changed, 326 insertions(+), 28 deletions(-)
+ create mode 100644 include/linux/tdx-guest.h
+
+diff --git a/Documentation/virt/coco/tdx-guest.rst b/Documentation/virt/coco/tdx-guest.rst
+index 46e316db6bb4..759497b1434a 100644
+--- a/Documentation/virt/coco/tdx-guest.rst
++++ b/Documentation/virt/coco/tdx-guest.rst
+@@ -50,3 +50,21 @@ TDX reference material is collected here:
+ https://www.intel.com/content/www/us/en/developer/articles/technical/intel-trust-domain-extensions.html
+ 
+ The driver is based on TDX module specification v1.0 and TDX GHCI specification v1.0.
++
++Kernel clients
++==============
++
++``<linux/tdx-guest.h>`` exposes the same native service to one in-kernel
++client.  The client receives the misc device as its lifetime anchor and a
++complete ``struct tdx_guest_ops``.  The operations retrieve TDREPORT or Quote
++bytes, read MRTD/RTMR values, extend an RTMR, and return immutable construction
++fields.
++
++Registering a client attaches it immediately when the service is already
++available.  Otherwise attachment occurs when the TDX guest driver finishes
++initialization.  Driver removal calls the client's remove callback before
++freeing report or Quote buffers.  Client unregistration similarly drains the
++attachment before returning.
++
++The misc ioctl, TSM-report configfs interface, and TSM-MR sysfs attributes
++remain independent frontends over the same native serialization and buffers.
+diff --git a/MAINTAINERS b/MAINTAINERS
+index 773ba70accbf..528b1f91a243 100644
+--- a/MAINTAINERS
++++ b/MAINTAINERS
+@@ -29689,6 +29689,9 @@ L:	linux-coco@lists.linux.dev
+ L:	kvm@vger.kernel.org
+ S:	Supported
+ T:	git git://git.kernel.org/pub/scm/linux/kernel/git/tip/tip.git x86/tdx
++F:	Documentation/virt/coco/tdx-guest.rst
++F:	drivers/virt/coco/tdx-guest/
++F:	include/linux/tdx-guest.h
+ N:	tdx
+ K:	\b(tdx)
+ 
+diff --git a/drivers/virt/coco/tdx-guest/tdx-guest.c b/drivers/virt/coco/tdx-guest/tdx-guest.c
+index d0303e31e816..0d5317060246 100644
+--- a/drivers/virt/coco/tdx-guest/tdx-guest.c
++++ b/drivers/virt/coco/tdx-guest/tdx-guest.c
+@@ -19,6 +19,7 @@
+ #include <linux/sockptr.h>
+ #include <linux/tsm.h>
+ #include <linux/tsm-mr.h>
++#include <linux/tdx-guest.h>
+ 
+ #include <uapi/linux/tdx-guest.h>
+ 
+@@ -27,10 +28,21 @@
+ 
+ /* TDREPORT buffer */
+ static u8 *tdx_report_buf;
++static struct tdx_guest_info tdx_guest_info;
++static struct miscdevice tdx_misc_dev;
++
++static_assert(TDX_REPORTDATA_LEN == TDX_GUEST_REPORTDATA_LEN);
++static_assert(TDX_REPORT_LEN == TDX_GUEST_REPORT_LEN);
+ 
+ /* Lock to serialize TDG.MR.REPORT and TDG.MR.RTMR.EXTEND TDCALLs */
+ static DEFINE_MUTEX(mr_lock);
+ 
++/* Serializes native client registration and service attachment. */
++static DEFINE_MUTEX(client_lock);
++static const struct tdx_guest_client *tdx_client;
++static void *tdx_client_priv;
++static bool tdx_service_ready;
++
+ /* TDREPORT fields */
+ enum {
+ 	TDREPORT_reportdata = 128,
+@@ -49,24 +61,30 @@ enum {
+ 	TDREPORT_servtd_hash = TDREPORT_rtmr3 + SHA384_DIGEST_SIZE,
+ };
+ 
+-static int tdx_do_report(sockptr_t data, sockptr_t tdreport)
++static int __tdx_do_report(sockptr_t data, sockptr_t tdreport)
+ {
+-	scoped_cond_guard(mutex_intr, return -EINTR, &mr_lock) {
+-		u8 *reportdata = tdx_report_buf + TDREPORT_reportdata;
+-		int ret;
++	u8 *reportdata = tdx_report_buf + TDREPORT_reportdata;
++	int ret;
+ 
+-		if (!sockptr_is_null(data) &&
+-		    copy_from_sockptr(reportdata, data, TDX_REPORTDATA_LEN))
+-			return -EFAULT;
++	lockdep_assert_held(&mr_lock);
++	if (!sockptr_is_null(data) &&
++	    copy_from_sockptr(reportdata, data, TDX_REPORTDATA_LEN))
++		return -EFAULT;
+ 
+-		ret = tdx_mcall_get_report0(reportdata, tdx_report_buf);
+-		if (WARN_ONCE(ret, "tdx_mcall_get_report0() failed: %d", ret))
+-			return ret;
++	ret = tdx_mcall_get_report0(reportdata, tdx_report_buf);
++	if (WARN_ONCE(ret, "tdx_mcall_get_report0() failed: %d", ret))
++		return ret;
+ 
+-		if (!sockptr_is_null(tdreport) &&
+-		    copy_to_sockptr(tdreport, tdx_report_buf, TDX_REPORT_LEN))
+-			return -EFAULT;
+-	}
++	if (!sockptr_is_null(tdreport) &&
++	    copy_to_sockptr(tdreport, tdx_report_buf, TDX_REPORT_LEN))
++		return -EFAULT;
++	return 0;
++}
++
++static int tdx_do_report(sockptr_t data, sockptr_t tdreport)
++{
++	scoped_cond_guard(mutex_intr, return -EINTR, &mr_lock)
++		return __tdx_do_report(data, tdreport);
+ 	return 0;
+ }
+ 
+@@ -90,6 +108,76 @@ static int tdx_do_extend(u8 mr_ind, const u8 *data)
+ 	return 0;
+ }
+ 
++static bool tdx_guest_device_valid(struct device *dev)
++{
++	return dev && dev == tdx_misc_dev.this_device;
++}
++
++static const struct tdx_guest_info *tdx_guest_info_get(struct device *dev)
++{
++	return tdx_guest_device_valid(dev) ? &tdx_guest_info : NULL;
++}
++
++static int tdx_guest_report_get(struct device *dev, const u8 *reportdata,
++				size_t length, void *out, size_t capacity,
++				size_t *out_length)
++{
++	int ret;
++
++	if (!tdx_guest_device_valid(dev))
++		return -ENODEV;
++	if (!reportdata || length != TDX_REPORTDATA_LEN || !out || !out_length)
++		return -EINVAL;
++	if (capacity < TDX_REPORT_LEN)
++		return -EMSGSIZE;
++	scoped_cond_guard(mutex_intr, return -EINTR, &mr_lock) {
++		ret = __tdx_do_report(KERNEL_SOCKPTR((void *)reportdata),
++				      KERNEL_SOCKPTR(NULL));
++		if (ret)
++			return ret;
++		memcpy(out, tdx_report_buf, TDX_REPORT_LEN);
++	}
++	*out_length = TDX_REPORT_LEN;
++	return 0;
++}
++
++static int tdx_guest_mr_read(struct device *dev, enum tdx_guest_mr mr,
++			     u8 value[SHA384_DIGEST_SIZE])
++{
++	static const size_t offsets[] = {
++		[TDX_GUEST_MR_MRTD] = TDREPORT_mrtd,
++		[TDX_GUEST_MR_RTMR0] = TDREPORT_rtmr0,
++		[TDX_GUEST_MR_RTMR1] = TDREPORT_rtmr1,
++		[TDX_GUEST_MR_RTMR2] = TDREPORT_rtmr2,
++		[TDX_GUEST_MR_RTMR3] = TDREPORT_rtmr3,
++	};
++	int ret;
++
++	if (!tdx_guest_device_valid(dev))
++		return -ENODEV;
++	if (mr >= ARRAY_SIZE(offsets) || !value)
++		return -EINVAL;
++	scoped_cond_guard(mutex_intr, return -EINTR, &mr_lock) {
++		ret = __tdx_do_report(KERNEL_SOCKPTR(NULL),
++				      KERNEL_SOCKPTR(NULL));
++		if (ret)
++			return ret;
++		memcpy(value, tdx_report_buf + offsets[mr],
++		       SHA384_DIGEST_SIZE);
++	}
++	return 0;
++}
++
++static int tdx_guest_rtmr_extend(struct device *dev, unsigned int rtmr,
++				 const u8 value[SHA384_DIGEST_SIZE])
++{
++	if (!tdx_guest_device_valid(dev))
++		return -ENODEV;
++	if (rtmr >= 4 || !value)
++		return -EINVAL;
++	return tdx_do_extend(rtmr, value);
++}
++
+ #define TDX_MR_(r) .mr_value = (void *)TDREPORT_##r, TSM_MR_(r, SHA384)
+ static struct tsm_measurement_register tdx_mrs[] = {
+ 	{ TDX_MR_(rtmr0) | TSM_MR_F_RTMR },
+@@ -135,6 +223,12 @@ static const struct attribute_group *tdx_mr_init(void)
+ 	rc = tdx_mr_refresh(&tdx_measurements);
+ 	if (rc)
+ 		return ERR_PTR(rc);
++	memcpy(tdx_guest_info.mrconfigid,
++	       buf + TDREPORT_mrconfigid, SHA384_DIGEST_SIZE);
++	memcpy(tdx_guest_info.mrowner,
++	       buf + TDREPORT_mrowner, SHA384_DIGEST_SIZE);
++	memcpy(tdx_guest_info.mrownerconfig,
++	       buf + TDREPORT_mrownerconfig, SHA384_DIGEST_SIZE);
+ 
+ 	/*
+ 	 * @mr_value was initialized with the offset only, while the base
+@@ -191,6 +285,8 @@ struct tdx_quote_buf {
+ 	u8 data[];
+ };
+ 
++static_assert(TDX_QUOTE_MAX_LEN == TDX_GUEST_QUOTE_MAX_LEN);
++
+ /* Quote data buffer */
+ static void *quote_data;
+ 
+@@ -265,15 +361,18 @@ static int wait_for_quote_completion(struct tdx_quote_buf *quote_buf, u32 timeou
+ 	return (i == timeout) ? -ETIMEDOUT : 0;
+ }
+ 
+-static int tdx_report_new_locked(struct tsm_report *report, void *data)
++static int __tdx_guest_quote_get(const u8 *reportdata, size_t length,
++				 void *out, size_t capacity,
++				 size_t *out_length)
+ {
+-	u8 *buf;
+ 	struct tdx_quote_buf *quote_buf = quote_data;
+-	struct tsm_report_desc *desc = &report->desc;
+ 	u32 out_len;
+ 	int ret;
+ 	u64 err;
+ 
++	lockdep_assert_held(&quote_lock);
++	if (!reportdata || length != TDX_REPORTDATA_LEN || !out || !out_length)
++		return -EINVAL;
+ 	/*
+ 	 * If the previous request is timedout or interrupted, and the
+ 	 * Quote buf status is still in GET_QUOTE_IN_FLIGHT (owned by
+@@ -282,16 +381,13 @@ static int tdx_report_new_locked(struct tsm_report *report, void *data)
+ 	if (quote_buf->status == GET_QUOTE_IN_FLIGHT)
+ 		return -EBUSY;
+ 
+-	if (desc->inblob_len != TDX_REPORTDATA_LEN)
+-		return -EINVAL;
+-
+ 	memset(quote_data, 0, GET_QUOTE_BUF_SIZE);
+ 
+ 	/* Update Quote buffer header */
+ 	quote_buf->version = GET_QUOTE_CMD_VER;
+ 	quote_buf->in_len = TDX_REPORT_LEN;
+ 
+-	ret = tdx_do_report(KERNEL_SOCKPTR(desc->inblob),
++	ret = tdx_do_report(KERNEL_SOCKPTR((void *)reportdata),
+ 			    KERNEL_SOCKPTR(quote_buf->data));
+ 	if (ret)
+ 		return ret;
+@@ -317,13 +413,10 @@ static int tdx_report_new_locked(struct tsm_report *report, void *data)
+ 
+ 	if (out_len > TDX_QUOTE_MAX_LEN)
+ 		return -EFBIG;
+-
+-	buf = kvmemdup(quote_buf->data, out_len, GFP_KERNEL);
+-	if (!buf)
+-		return -ENOMEM;
+-
+-	report->outblob = buf;
+-	report->outblob_len = out_len;
++	if (out_len > capacity)
++		return -EMSGSIZE;
++	memcpy(out, quote_buf->data, out_len);
++	*out_length = out_len;
+ 
+ 	/*
+ 	 * TODO: parse the PEM-formatted cert chain out of the quote buffer when
+@@ -333,6 +426,39 @@ static int tdx_report_new_locked(struct tsm_report *report, void *data)
+ 	return ret;
+ }
+ 
++static int tdx_guest_quote_get(struct device *dev, const u8 *reportdata,
++			       size_t length, void *out, size_t capacity,
++			       size_t *out_length)
++{
++	if (!tdx_guest_device_valid(dev))
++		return -ENODEV;
++	scoped_cond_guard(mutex_intr, return -EINTR, &quote_lock)
++		return __tdx_guest_quote_get(reportdata, length, out,
++					     capacity, out_length);
++	return 0;
++}
++
++static int tdx_report_new_locked(struct tsm_report *report, void *data)
++{
++	struct tsm_report_desc *desc = &report->desc;
++	size_t length;
++	void *buf;
++	int ret;
++
++	buf = kvmalloc(TDX_QUOTE_MAX_LEN, GFP_KERNEL);
++	if (!buf)
++		return -ENOMEM;
++	ret = __tdx_guest_quote_get(desc->inblob, desc->inblob_len,
++				    buf, TDX_QUOTE_MAX_LEN, &length);
++	if (ret) {
++		kvfree(buf);
++		return ret;
++	}
++	report->outblob = buf;
++	report->outblob_len = length;
++	return 0;
++}
++
+ static int tdx_report_new(struct tsm_report *report, void *data)
+ {
+ 	scoped_cond_guard(mutex_intr, return -EINTR, &quote_lock)
+@@ -402,6 +528,68 @@ static const struct tsm_report_ops tdx_tsm_ops = {
+ 	.report_bin_attr_visible = tdx_report_bin_attr_visible,
+ };
+ 
++static const struct tdx_guest_ops tdx_guest_ops = {
++	.info_get = tdx_guest_info_get,
++	.report_get = tdx_guest_report_get,
++	.quote_get = tdx_guest_quote_get,
++	.mr_read = tdx_guest_mr_read,
++	.rtmr_extend = tdx_guest_rtmr_extend,
++};
++
++static bool tdx_client_attached;
++
++static int tdx_guest_client_attach(void)
++{
++	void *priv;
++
++	lockdep_assert_held(&client_lock);
++	if (!tdx_client || !tdx_service_ready)
++		return 0;
++	priv = tdx_client->add(tdx_misc_dev.this_device, &tdx_guest_ops);
++	if (IS_ERR(priv))
++		return PTR_ERR(priv);
++	tdx_client_priv = priv;
++	tdx_client_attached = true;
++	return 0;
++}
++
++static void tdx_guest_client_detach(void)
++{
++	lockdep_assert_held(&client_lock);
++	if (!tdx_client_attached)
++		return;
++	tdx_client->remove(tdx_client_priv);
++	tdx_client_priv = NULL;
++	tdx_client_attached = false;
++}
++
++int tdx_guest_client_register(const struct tdx_guest_client *client)
++{
++	int ret;
++
++	if (!client || !client->add || !client->remove)
++		return -EINVAL;
++	guard(mutex)(&client_lock);
++	if (tdx_client)
++		return -EBUSY;
++	tdx_client = client;
++	ret = tdx_guest_client_attach();
++	if (ret)
++		tdx_client = NULL;
++	return ret;
++}
++EXPORT_SYMBOL_NS_GPL(tdx_guest_client_register, "TDX_GUEST");
++
++void tdx_guest_client_unregister(const struct tdx_guest_client *client)
++{
++	guard(mutex)(&client_lock);
++	if (WARN_ON_ONCE(client != tdx_client))
++		return;
++	tdx_guest_client_detach();
++	tdx_client = NULL;
++}
++EXPORT_SYMBOL_NS_GPL(tdx_guest_client_unregister, "TDX_GUEST");
++
+ static int __init tdx_guest_init(void)
+ {
+ 	int ret;
+@@ -427,9 +615,19 @@ static int __init tdx_guest_init(void)
+ 	ret = tsm_report_register(&tdx_tsm_ops, NULL);
+ 	if (ret)
+ 		goto free_quote;
++	scoped_guard(mutex, &client_lock) {
++		tdx_service_ready = true;
++		ret = tdx_guest_client_attach();
++		if (ret)
++			tdx_service_ready = false;
++	}
++	if (ret)
++		goto unregister_tsm;
+ 
+ 	return 0;
+ 
++unregister_tsm:
++	tsm_report_unregister(&tdx_tsm_ops);
+ free_quote:
+ 	free_quote_buf(quote_data);
+ free_misc:
+@@ -443,6 +641,10 @@ module_init(tdx_guest_init);
+ 
+ static void __exit tdx_guest_exit(void)
+ {
++	scoped_guard(mutex, &client_lock) {
++		tdx_guest_client_detach();
++		tdx_service_ready = false;
++	}
+ 	tsm_report_unregister(&tdx_tsm_ops);
+ 	free_quote_buf(quote_data);
+ 	misc_deregister(&tdx_misc_dev);
+diff --git a/include/linux/tdx-guest.h b/include/linux/tdx-guest.h
+new file mode 100644
+index 000000000000..65f367e4956a
+--- /dev/null
++++ b/include/linux/tdx-guest.h
+@@ -0,0 +1,75 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++#ifndef _LINUX_TDX_GUEST_H
++#define _LINUX_TDX_GUEST_H
++
++#include <crypto/sha2.h>
++#include <linux/types.h>
++
++struct device;
++
++#define TDX_GUEST_REPORTDATA_LEN 64
++#define TDX_GUEST_REPORT_LEN 1024
++#define TDX_GUEST_QUOTE_MAX_LEN ((128 * 1024) - 24)
++
++struct tdx_guest_info {
++	u8 mrconfigid[SHA384_DIGEST_SIZE];
++	u8 mrowner[SHA384_DIGEST_SIZE];
++	u8 mrownerconfig[SHA384_DIGEST_SIZE];
++};
++
++enum tdx_guest_mr {
++	TDX_GUEST_MR_MRTD,
++	TDX_GUEST_MR_RTMR0,
++	TDX_GUEST_MR_RTMR1,
++	TDX_GUEST_MR_RTMR2,
++	TDX_GUEST_MR_RTMR3,
++};
++
++/**
++ * struct tdx_guest_ops - Native TDX guest operations
++ * @info_get: Return immutable TD construction fields
++ * @report_get: Get a TDREPORT bound to report data
++ * @quote_get: Get a Quote bound to report data
++ * @mr_read: Read MRTD or an RTMR
++ * @rtmr_extend: Extend an RTMR
++ */
++struct tdx_guest_ops {
++	const struct tdx_guest_info *(*info_get)(struct device *dev);
++	int (*report_get)(struct device *dev, const u8 *reportdata,
++			  size_t length, void *out, size_t capacity,
++			  size_t *out_length);
++	int (*quote_get)(struct device *dev, const u8 *reportdata,
++			 size_t length, void *out, size_t capacity,
++			 size_t *out_length);
++	int (*mr_read)(struct device *dev, enum tdx_guest_mr mr,
++		       u8 value[SHA384_DIGEST_SIZE]);
++	int (*rtmr_extend)(struct device *dev, unsigned int rtmr,
++			   const u8 value[SHA384_DIGEST_SIZE]);
++};
++
++/**
++ * struct tdx_guest_client - Native TDX service consumer
++ * @add: Attach to the service and return client private data or an ERR_PTR
++ * @remove: Detach the client private data returned by @add
++ */
++struct tdx_guest_client {
++	void *(*add)(struct device *parent_dev,
++		     const struct tdx_guest_ops *ops);
++	void (*remove)(void *client_priv);
++};
++
++/**
++ * tdx_guest_client_register - Register one native TDX service consumer
++ * @client: Immutable add/remove callback pair
++ *
++ * Return: 0, or a negative errno.
++ */
++int tdx_guest_client_register(const struct tdx_guest_client *client);
++
++/**
++ * tdx_guest_client_unregister - Unregister a native TDX service consumer
++ * @client: Descriptor passed to tdx_guest_client_register()
++ */
++void tdx_guest_client_unregister(const struct tdx_guest_client *client);
++
++#endif /* _LINUX_TDX_GUEST_H */
+-- 
+2.55.0
+
