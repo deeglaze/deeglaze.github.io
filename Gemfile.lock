@@ -9,7 +9,7 @@ GIT
 GEM
   remote: https://rubygems.org/
   specs:
-    activesupport (8.0.2)
+    activesupport (7.2.3)
       base64
       benchmark (>= 0.3)
       bigdecimal
@@ -21,9 +21,69 @@ GEM
       minitest (>= 5.1)
       securerandom (>= 0.3)
       tzinfo (~> 2.0, >= 2.0.5)
-      uri (>= 0.13.1)
     addressable (2.8.7)
       public_suffix (>= 2.0.2, < 7.0)
+    al_analytics (1.0.2)
+      jekyll (>= 3.9, < 5.0)
+      liquid (>= 4.0, < 6.0)
+    al_charts (1.0.1)
+      jekyll (>= 3.9, < 5.0)
+      liquid (>= 4.0, < 6.0)
+    al_citations (1.0.1)
+      activesupport (>= 6.0, < 8.0)
+      jekyll (>= 3.9, < 5.0)
+      nokogiri (>= 1.13, < 2.0)
+    al_comments (1.0.0)
+      jekyll (>= 3.9, < 5.0)
+      liquid (>= 4.0, < 6.0)
+    al_cookie (1.0.1)
+      jekyll (>= 3.9, < 5.0)
+      liquid (>= 4.0, < 6.0)
+    al_email_protect (1.0.1)
+      jekyll (>= 3.9, < 5.0)
+      liquid (>= 4.0, < 6.0)
+    al_ext_posts (1.0.3)
+      feedjira (>= 3.2, < 5.0)
+      httparty (>= 0.18, < 1.0)
+      jekyll (>= 3.9, < 5.0)
+      nokogiri (>= 1.13, < 2.0)
+    al_folio_bootstrap_compat (1.0.0)
+      jekyll (>= 3.9, < 5.0)
+      liquid (>= 4.0, < 6.0)
+    al_folio_core (1.0.15)
+      jekyll (>= 3.9, < 5.0)
+      liquid (>= 4.0, < 6.0)
+    al_folio_cv (1.0.2)
+      jekyll (>= 3.9, < 5.0)
+      liquid (>= 4.0, < 6.0)
+    al_folio_distill (1.0.3)
+      jekyll (>= 3.9, < 5.0)
+      liquid (>= 4.0, < 6.0)
+    al_folio_upgrade (1.0.3)
+      al_folio_core (>= 1.0.0)
+      jekyll (>= 3.9, < 5.0)
+      liquid (>= 4.0, < 6.0)
+    al_icons (1.0.0)
+      jekyll (>= 3.9, < 5.0)
+      liquid (>= 4.0, < 6.0)
+    al_img_tools (1.0.3)
+      jekyll (>= 3.9, < 5.0)
+      jekyll-3rd-party-libraries (~> 0.0.1)
+    al_marimo (1.0.0)
+      jekyll (>= 3.9, < 5.0)
+      liquid (>= 4.0, < 6.0)
+    al_math (1.0.2)
+      jekyll (>= 3.9, < 5.0)
+      liquid (>= 4.0, < 6.0)
+    al_newsletter (1.0.0)
+      jekyll (>= 3.9, < 5.0)
+      liquid (>= 4.0, < 6.0)
+    al_rtl (1.0.0)
+      jekyll (>= 3.9, < 5.0)
+      liquid (>= 4.0, < 6.0)
+    al_search (1.0.3)
+      jekyll (>= 3.9, < 5.0)
+      liquid (>= 4.0, < 6.0)
     base64 (0.2.0)
     benchmark (0.4.0)
     bibtex-ruby (6.1.0)
@@ -74,6 +134,7 @@ GEM
     feedjira (3.2.5)
       loofah (>= 2.3.1, < 3)
       sax-machine (>= 1.0, < 2)
+    ffi (1.17.2)
     ffi (1.17.2-aarch64-linux-gnu)
     ffi (1.17.2-aarch64-linux-musl)
     ffi (1.17.2-arm-linux-gnu)
@@ -117,6 +178,10 @@ GEM
       multi_xml (>= 0.5.2)
     i18n (1.14.7)
       concurrent-ruby (~> 1.0)
+    jekyll-3rd-party-libraries (0.0.1)
+      css_parser (>= 1.6, < 2.0)
+      jekyll (>= 3.6, < 5.0)
+      nokogiri (>= 1.8, < 2.0)
     jekyll (4.4.1)
       addressable (~> 2.4)
       base64 (~> 0.2)
@@ -138,6 +203,8 @@ GEM
       webrick (~> 1.7)
     jekyll-archives-v2 (0.0.6)
       activesupport
+      jekyll (>= 3.6, < 5.0)
+    jekyll-cache-bust (0.0.1)
       jekyll (>= 3.6, < 5.0)
     jekyll-email-protect (1.1.0)
     jekyll-feed (0.17.0)
@@ -168,6 +235,8 @@ GEM
       jekyll (~> 4.0)
     jekyll-sitemap (1.4.0)
       jekyll (>= 3.7, < 5.0)
+    jekyll-socials (0.0.7)
+      jekyll (>= 3.6, < 5.0)
     jekyll-tabs (1.2.1)
       jekyll (>= 3.0, < 5.0)
     jekyll-toc (0.19.0)
@@ -199,11 +268,17 @@ GEM
     matrix (0.4.2)
     mercenary (0.4.0)
     mini_mime (1.1.5)
-    minitest (5.25.5)
+    mini_portile2 (2.8.9)
+    minitest (6.0.6)
+      drb (~> 2.0)
+      prism (~> 1.5)
     multi_xml (0.7.2)
       bigdecimal (~> 3.1)
     namae (1.2.0)
       racc (~> 1.7)
+    nokogiri (1.18.8)
+      mini_portile2 (~> 2.8.2)
+      racc (~> 1.4)
     nokogiri (1.18.8-aarch64-linux-gnu)
       racc (~> 1.4)
     nokogiri (1.18.8-aarch64-linux-musl)
@@ -228,6 +303,7 @@ GEM
     ostruct (0.6.1)
     pathutil (0.16.2)
       forwardable-extended (~> 2.6)
+    prism (1.9.0)
     public_suffix (6.0.2)
     racc (1.8.1)
     rake (13.2.1)
@@ -287,12 +363,31 @@ PLATFORMS
   x86_64-linux-musl
 
 DEPENDENCIES
+  al_analytics (= 1.0.2)
+  al_charts (= 1.0.1)
+  al_citations (= 1.0.1)
+  al_comments (= 1.0.0)
+  al_cookie (= 1.0.1)
+  al_email_protect (= 1.0.1)
+  al_ext_posts (= 1.0.3)
+  al_folio_bootstrap_compat (= 1.0.0)
+  al_folio_core (= 1.0.15)
+  al_folio_cv (= 1.0.2)
+  al_folio_distill (= 1.0.3)
+  al_folio_upgrade (= 1.0.3)
+  al_icons (= 1.0.0)
+  al_img_tools (= 1.0.3)
+  al_marimo (= 1.0.0)
+  al_math (= 1.0.2)
+  al_newsletter (= 1.0.0)
+  al_rtl (= 1.0.0)
+  al_search (= 1.0.3)
   classifier-reborn
   css_parser
-  feedjira
-  httparty
   jekyll
+  jekyll-3rd-party-libraries
   jekyll-archives-v2
+  jekyll-cache-bust
   jekyll-email-protect
   jekyll-feed
   jekyll-get-json
@@ -304,6 +399,7 @@ DEPENDENCIES
   jekyll-regex-replace
   jekyll-scholar
   jekyll-sitemap
+  jekyll-socials
   jekyll-tabs
   jekyll-terser!
   jekyll-toc
@@ -313,4 +409,4 @@ DEPENDENCIES
   ostruct
 
 BUNDLED WITH
-   2.6.9
+  4.0.23
