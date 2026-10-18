@@ -1,0 +1,387 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Guide — CTLV family specifications</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="layout">
+<nav class="side">
+  <a class="brand" href="index.html">CTLV specs</a>
+  <div class="switch">
+    <a class="here" href="guide.html">Guide</a>
+    <a href="reference.html">Reference</a>
+    <a href="netlink.html">Netlink</a>
+  </div>
+  <ol>
+    <li><a href="#what">1. What a specification is</a></li>
+    <li><a href="#first-look">2. A first look</a></li>
+    <li><a href="#attrs">3. Attributes and groups</a></li>
+    <li><a href="#sets">4. Attr sets</a></li>
+    <li><a href="#ops">5. Operations</a></li>
+    <li><a href="#types">6. Choosing types</a></li>
+    <li><a href="#repeat">7. Repetition and nesting</a></li>
+    <li><a href="#query-event">8. Queries and events</a></li>
+    <li><a href="#inherit">9. Inheritance and extension</a></li>
+    <li><a href="#register">10. Registering and generating</a></li>
+    <li><a href="#evolve">11. Changing a family later</a></li>
+    <li><a href="#next">12. Where to go next</a></li>
+  </ol>
+</nav>
+<main>
+<h1>Guide: writing a CTLV specification</h1>
+<p class="lead">This guide builds up the YAML language one idea at a time. It assumes you can read YAML and have a rough idea what an ioctl is. For exhaustive rules, keep the <a href="reference.html">reference</a> open alongside.</p>
+
+<h2 id="what">1. What a specification is</h2>
+<p>A CTLV device exposes a set of <strong>operations</strong>. Userspace sends a request and receives a reply; the device may also announce events. Every request and reply is a tree of typed <strong>attributes</strong>. A <strong>family</strong> is the named collection of operations and attributes one kind of device supports.</p>
+<p>You write down the family in a single YAML file. From that file the tooling generates:</p>
+<ul>
+  <li>a UAPI header with the numeric IDs userspace uses,</li>
+  <li>a kernel header and source with metadata and typed accessors for driver code,</li>
+  <li>the schema the running kernel uses to reject malformed messages before your driver code sees them.</li>
+</ul>
+<p>The YAML is therefore not documentation about the interface. It <em>is</em> the interface, and it is checked into an ABI baseline so that it cannot drift by accident.</p>
+
+<h3>The pieces</h3>
+<p>A specification has up to six top-level sections. Only <code>family</code> is required.</p>
+<table>
+<tr><th>Section</th><th>What it holds</th></tr>
+<tr><td><code>family</code></td><td>The family's name and who it inherits from</td></tr>
+<tr><td><code>enums</code>, <code>flags</code></td><td>Named lists of values that attributes can use</td></tr>
+<tr><td><code>attr-groups</code></td><td>The attributes themselves, organised in named groups</td></tr>
+<tr><td><code>attr-sets</code></td><td>Named bundles of attributes: the shape of one message level</td></tr>
+<tr><td><code>ops</code></td><td>The operations, each pointing at the attr sets for its request and reply</td></tr>
+</table>
+<p>The separation between <em>declaring</em> an attribute (in a group) and <em>using</em> it (through a set, in an op) is the main idea of the language. Declare an attribute once, then reuse it in as many messages as you like.</p>
+
+<h2 id="first-look">2. A first look</h2>
+<p>The smallest real specification in the tree belongs to <code>ctlv-attestation-tdx</code>. It extends an attestation family with three Intel TDX registers:</p>
+<pre data-title="Documentation/ctlv/specs/ctlv-attestation-tdx.yaml"><code># SPDX-License-Identifier: ((GPL-2.0 WITH Linux-syscall-note) OR BSD-3-Clause)
+%YAML 1.2
+---
+family:
+  name: ctlv-attestation-tdx
+  inherits: ctlv-attestation
+  pre-init: true
+
+attr-groups:
+  - name: info
+    attrs:
+      - name: mrconfigid
+        type: binary
+        min-length: 48
+        max-length: 48
+      - name: mrowner
+        type: binary
+        min-length: 48
+        max-length: 48
+      - name: mrownerconfig
+        type: binary
+        min-length: 48
+        max-length: 48
+
+attr-sets:
+  - name: device-info
+    attrs:
+      - info.mrconfigid
+      - info.mrowner
+      - info.mrownerconfig</code></pre>
+<p>Read it top to bottom:</p>
+<ol>
+  <li>The first line is a license comment. It is required, and every generated file inherits it.</li>
+  <li><code>family</code> names this family and says it <code>inherits</code> <code>ctlv-attestation</code>. It gets everything that family has, and adds to it. <code>pre-init: true</code> is a kernel-side flag; for now, ignore it.</li>
+  <li><code>attr-groups</code> declares one group, <code>info</code>, with three attributes. Each is a fixed 48-byte binary string.</li>
+  <li><code>attr-sets</code> fills <code>device-info</code>, an empty slot the parent family left open. Whatever the parent's <code>device-get</code> operation replies, it now also includes these three attributes.</li>
+</ol>
+<p>There are no <code>ops</code> here at all. This family adds data to an operation it inherited rather than defining a new one. That mechanism, a <em>stub</em>, is covered in <a href="#inherit">section 9</a>.</p>
+
+<h2 id="attrs">3. Attributes and groups</h2>
+<p>We will build a small invented family, <code>ctlv-example</code>, that manages network ports. Start with the header and the attributes:</p>
+<pre><code># SPDX-License-Identifier: ((GPL-2.0 WITH Linux-syscall-note) OR BSD-3-Clause)
+%YAML 1.2
+---
+family:
+  name: ctlv-example
+  inherits: ctlv
+
+attr-groups:
+  - name: port
+    attrs:
+      - name: index
+        type: uint
+        max: 255
+      - name: label
+        type: string
+        max-length: 31
+      - name: mtu
+        type: uint
+        min: 68
+        max: 9000</code></pre>
+<p>Every family except the root one, <code>ctlv</code>, must say which family it inherits. A family directly below the root names <code>ctlv</code>. The name of a child must be its parent's name, a dash, and a suffix; that is why <code>ctlv-example</code> works under <code>ctlv</code>.</p>
+<p>A <strong>group</strong> is a namespace. The attribute is referred to elsewhere as <code>port.index</code>, <code>port.label</code> and <code>port.mtu</code>. The group name also becomes part of the generated C names, such as <code>CTLV_EXAMPLE_ATTR_PORT_INDEX</code>.</p>
+<p>Each attribute has a <code>name</code> and exactly one <em>primary form</em>: <code>type</code>, <code>enum</code>, <code>flags</code>, <code>attrs</code> or <code>blob</code>. Here all three use <code>type</code>. The remaining keys narrow what values are valid. The kernel enforces them: a request with <code>port.index</code> equal to 300 is refused before a driver sees it.</p>
+
+<div class="note">
+<p><strong>Order matters.</strong> An attribute's wire ID comes from its position in its group, and a group's from its position in the file. Reordering or deleting entries changes the ABI. Append, never rearrange.</p>
+</div>
+
+<h2 id="sets">4. Attr sets</h2>
+<p>Declaring an attribute does not put it in any message. An <strong>attr set</strong> does that. A set lists which attributes appear at one level of a message, split into required and optional:</p>
+<pre><code>attr-sets:
+  - name: port-select
+    attrs: port.index
+
+  - name: port-config
+    attrs: port.index
+    optional-attrs:
+      - port.label
+      - port.mtu
+
+  - name: port-entry
+    attrs: port.index
+    optional-attrs:
+      - port.label
+      - port.mtu</code></pre>
+<p>A list entry is a <strong>selector</strong>. It can be:</p>
+<ul>
+  <li><code>group.attr</code> — one attribute,</li>
+  <li><code>group</code> — every attribute in the group,</li>
+  <li><code>set</code> — every member of another set.</li>
+</ul>
+<p>When a list has one item, you may write it without the dash, as above. A required attribute must be present in every message of that shape, otherwise the kernel replies with an error naming the missing attribute. An optional one may be left out.</p>
+<p>Sets can be defined once and reused by several operations, so <code>port-entry</code> can describe both a single reply and each item of a list.</p>
+
+<h2 id="ops">5. Operations</h2>
+<p>Operations tie request and reply shapes to a name:</p>
+<pre><code>ops:
+  - name: port-set
+    type: action
+    request:
+      attrs: port-config
+
+  - name: port-get
+    type: action
+    fd-access: read
+    request:
+      attrs: port-select
+    reply:
+      attrs: port-entry</code></pre>
+<p>An <code>action</code> runs once and returns one reply. <code>port-set</code> has no <code>reply</code>, which means it returns a bare acknowledgement. The <code>request</code> and <code>reply</code> keys each take <code>attrs</code> and <code>optional-attrs</code> selectors, just like a set.</p>
+<p><code>fd-access</code> says what kind of file descriptor may run the operation. <code>read</code> allows an observation-only descriptor; the default, <code>read-write</code>, needs a full-control one. So <code>port-get</code> can be used by monitoring tools, and <code>port-set</code> cannot.</p>
+<p>Operations are numbered by position in the <code>ops</code> list, starting at 1.</p>
+
+<h3>Optional and dynamic operations</h3>
+<p>Two more switches control whether an operation is available on a particular device:</p>
+<dl class="keys">
+  <dt><code>optional: true</code></dt>
+  <dd>The operation does not exist on a device unless the driver turns it on during initialization. If it is not turned on, it is absent from introspection.</dd>
+  <dt><code>availability: dynamic</code></dt>
+  <dd>The driver may disable and re-enable the operation at run time. A disabled operation stays visible but returns <code>-EOPNOTSUPP</code>.</dd>
+</dl>
+
+<h2 id="types">6. Choosing types</h2>
+<p>An attribute's primary form decides what its payload is.</p>
+<table>
+<tr><th>Write</th><th>Payload</th><th>Useful keys</th></tr>
+<tr><td><code>type: uint</code></td><td>64-bit unsigned integer</td><td><code>min</code>, <code>max</code>, <code>unit</code>, <code>scale</code></td></tr>
+<tr><td><code>type: sint</code></td><td>64-bit signed integer</td><td>same</td></tr>
+<tr><td><code>type: bool</code></td><td>One byte, 0 or 1</td><td></td></tr>
+<tr><td><code>type: string</code></td><td>Text</td><td><code>max-length</code> (required), <code>min-length</code></td></tr>
+<tr><td><code>type: binary</code></td><td>Raw bytes</td><td><code>length</code>, or <code>max-length</code> and <code>min-length</code></td></tr>
+<tr><td><code>enum: name</code></td><td>One value from a named list</td><td></td></tr>
+<tr><td><code>flags: name</code></td><td>A bit mask from a named list</td><td></td></tr>
+<tr><td><code>attrs: …</code></td><td>A nested group of attributes</td><td><code>optional-attrs</code>, <code>recursive</code></td></tr>
+<tr><td><code>blob: {…}</code></td><td>A reference to caller memory</td><td>see below</td></tr>
+</table>
+<p>Integers are always 64 bits on the wire; use <code>min</code> and <code>max</code> to say how big they can really get. Strings must declare <code>max-length</code>, so every message has a known worst-case size.</p>
+
+<h3>Enums and flags</h3>
+<p>Declare the list once, then refer to it by name:</p>
+<pre><code>enums:
+  - name: link-state
+    values:
+      - down
+      - up
+
+flags:
+  - name: link-caps
+    values:
+      - autoneg
+      - duplex
+
+attr-groups:
+  - name: port
+    attrs:
+      # …index, label, mtu as before…
+      - name: state
+        enum: link-state
+      - name: caps
+        flags: link-caps</code></pre>
+<p>Enum values are numbered from 1 in the order written (0 is reserved), and flag bits from bit 0. As with everything numbered by position, only append to either list.</p>
+
+<h3>Units</h3>
+<p>An integer can carry a <code>unit</code> (<code>seconds</code>, <code>hertz</code>, <code>bytes</code> or <code>celsius</code>) and a decimal <code>scale</code> exponent, so that tools can interpret it. <code>scale</code> only makes sense with a <code>unit</code>:</p>
+<pre><code>- name: queue-len
+  type: uint
+  unit: bytes</code></pre>
+
+<h3>Blobs</h3>
+<p>A <code>blob</code> does not carry data inside the message. It describes a buffer in the caller's address space, for payloads too large to inline:</p>
+<pre><code>- name: data
+  blob:
+    direction: input
+    allowed-backings: [ va ]
+    max-length: 1048576
+    alignment: 8</code></pre>
+<p><code>direction</code> says whether the driver reads the buffer (<code>input</code>), writes it (<code>output</code>) or both (<code>inout</code>). Blobs appear only in requests.</p>
+
+<h2 id="repeat">7. Repetition and nesting</h2>
+<h3>Repeated attributes</h3>
+<p>By default an attribute occurs once. <code>max-occurrences</code> permits more:</p>
+<pre><code>- name: object
+  attrs: evidence-object-request
+  max-occurrences: 16</code></pre>
+<p>The value <code>unlimited</code> is also accepted, but only for attributes that appear in a query reply (next section), because unlimited things have no worst-case size.</p>
+
+<h3>Nested attributes</h3>
+<p>An attribute written with <code>attrs</code> holds a whole sub-message. Combined with <code>max-occurrences</code>, it makes a list of records:</p>
+<pre><code>  - name: list
+    attrs:
+      - name: port
+        attrs: port-entry
+        max-occurrences: unlimited</code></pre>
+<p>Here <code>list.port</code> is an attribute whose payload is a <code>port-entry</code>, and a reply may contain many of them. Nests may go at most 31 levels deep, and the generator rejects cycles.</p>
+<p>A nest that must contain <em>itself</em>, such as a tree, uses <code>recursive: true</code> with exactly one attr set. This is only for query replies, and is used by the schema-introspection operation of the root family.</p>
+
+<h2 id="query-event">8. Queries and events</h2>
+<p>There are three operation types. You have seen <code>action</code>. The other two:</p>
+<pre><code>  - name: ports-dump
+    type: query
+    fd-access: read
+    reply:
+      attrs: list.port
+
+  - name: port-changed
+    type: event
+    reply:
+      attrs: port-changed-info</code></pre>
+<p>A <strong>query</strong> may produce a reply too large for the caller's buffer, in which case it is returned in fragments. This is why only queries may have <code>unlimited</code> repetition. A query must declare a <code>reply</code>. You can hint the buffer size to start with using <code>suggested-reply-length</code>; the generator rejects a value below what the largest unsplittable element of the reply needs.</p>
+<p>An <strong>event</strong> is sent by the device without being asked. It has a reply shape and nothing else: no request, no <code>fd-access</code>, no <code>optional</code>, no <code>availability</code>. Userspace subscribes to the events it cares about and reads them from the file descriptor.</p>
+
+<div class="note">
+<p><strong>The complete example.</strong> The four operations above, with the enums, flags, groups and sets from the earlier sections, form the whole <code>ctlv-example</code> spec used in this guide. It passes the <code>--validate</code> check of the generator once registered.</p>
+</div>
+
+<h2 id="inherit">9. Inheritance and extension</h2>
+<p>A family inherits from exactly one parent. The child gets all of the parent's operations, attributes and sets with their IDs unchanged. A device of the child family answers every operation of every ancestor, which is how the root family's discovery operations work on every device.</p>
+<p>A child may add anything new. It can only change what the parent already declared in one way: by filling a <strong>stub</strong>.</p>
+
+<h3>Stubs</h3>
+<p>A parent reserves an extension point by declaring an attr set with <code>stub: true</code> and no members, and using it like any other attribute source:</p>
+<pre><code># in ctlv-example
+attr-groups:
+  - name: port
+    attrs:
+      # …
+      - name: details
+        attrs: port-details
+
+attr-sets:
+  - name: port-details
+    stub: true
+  - name: port-entry
+    attrs: port.index
+    optional-attrs:
+      # …
+      - port.details</code></pre>
+<p>A child declares an attr set with the same name and gives it members:</p>
+<pre><code># ctlv-example-vendor.yaml
+family:
+  name: ctlv-example-vendor
+  inherits: ctlv-example
+
+attr-groups:
+  - name: vendor
+    attrs:
+      - name: serial
+        type: uint
+
+attr-sets:
+  - name: port-details
+    optional-attrs: vendor.serial</code></pre>
+<p>Now every <code>port-entry</code> reply from a vendor device can carry a <code>port.details</code> nest containing <code>vendor.serial</code>. The parent never mentions the vendor; the vendor never edits the parent. On devices of the parent family the unfilled extension point contributes nothing to the message.</p>
+<p>That is exactly what the TDX spec in section 2 does. A stub can be filled once, by one descendant in a chain, and a fill is also part of the ABI.</p>
+
+<h2 id="register">10. Registering and generating</h2>
+<p>A specification is not live until it is registered. Three files change together:</p>
+<ol>
+  <li><code>Documentation/ctlv/specs/ctlv-example.yaml</code> — the specification. The file name must be the family name.</li>
+  <li><code>Documentation/ctlv/families.yaml</code> — append the family name. Its position in the list <em>is</em> its numeric ID, so this list is append-only. A parent must appear before its children.</li>
+  <li><code>Documentation/ctlv/generated-files.yaml</code> — say where the generated files go:</li>
+</ol>
+<pre><code>  - name: ctlv-example
+    source: Documentation/ctlv/specs/ctlv-example.yaml
+    outputs:
+      uapi-header: include/uapi/linux/ctlv_example_gen.h
+      kernel-header: drivers/example/ctlv_example_gen.h
+      kernel-source: drivers/example/ctlv_example_gen.c</code></pre>
+<p>Then run:</p>
+<pre><code>make -C tools/ctlv regen    # write the generated files
+make -C tools/ctlv all      # validate and compare against the ABI snapshots</code></pre>
+<p>Never edit a generated file by hand. Change the YAML and regenerate. The tool is Python and needs <code>pyyaml</code> and <code>jsonschema</code> (<code>tools/ctlv/requirements.txt</code>).</p>
+
+<h3>What comes out</h3>
+<p>For <code>ctlv-example</code> the UAPI header defines names such as:</p>
+<pre><code>CTLV_EXAMPLE_ATTR_PORT_INDEX      /* from group "port", attr "index" */
+CTLV_EXAMPLE_OP_PORT_SET          /* from op "port-set" */
+CTLV_EXAMPLE_LINK_STATE_UP        /* from enum "link-state", value "up" */
+CTLV_EXAMPLE_LINK_CAPS_AUTONEG    /* from flags "link-caps" */</code></pre>
+<p>Dashes become underscores and everything is upper case. If two YAML names would collapse to the same C name, the generator reports the clash instead of silently dropping one.</p>
+<p>The kernel header gives driver code typed getters and putters for each attribute and a callback to implement for each operation. Those are described in <code>Documentation/driver-api/ctlv.rst</code>.</p>
+
+<h2 id="evolve">11. Changing a family later</h2>
+<p>Once a family ships, userspace depends on it. The tooling keeps a checked-in <strong>ABI snapshot</strong> of each family under <code>Documentation/ctlv/abi/</code> and refuses a spec that is incompatible with it. The snapshot is produced by:</p>
+<pre><code>make -C tools/ctlv abi-update</code></pre>
+<p>Run it deliberately: the diff of the snapshot is how reviewers see an interface change.</p>
+
+<h3>Safe changes</h3>
+<ul>
+  <li>Appending new attributes, groups, ops, enum values and flag bits.</li>
+  <li>Adding a new attribute to an existing message as <em>optional</em>.</li>
+  <li>Widening a bound: a larger <code>max</code>, a smaller <code>min</code>, more <code>max-occurrences</code>.</li>
+  <li>Making a required attribute optional.</li>
+</ul>
+
+<h3>Breaking changes</h3>
+<p>The checker names each one. Narrowing <code>port.index</code> from 255 to 200:</p>
+<pre><code>ctlvgen: ctlv-example against ctlv/abi/ctlv-example.yaml: the schema is not compatible with its snapshot
+  attr port.index: max was narrowed from 255 to 200</code></pre>
+<p>Making existing optional attributes required:</p>
+<pre><code>  op port-set request: port.label became required
+  op port-set request: port.mtu became required</code></pre>
+<p>Adding a new attribute to a message as required:</p>
+<pre><code>  op port-changed reply: new port.mtu must be optional</code></pre>
+<p>Removing or renumbering anything is also a break, which is why the order of declarations matters. In the registry, a family that is no longer wanted can be marked <code>deprecated</code>, but its slot is never reused:</p>
+<pre><code>families:
+  - ctlv
+  - name: ctlv-old-thing
+    deprecated: true</code></pre>
+
+<h2 id="next">12. Where to go next</h2>
+<ul>
+  <li>The <a href="reference.html">reference</a> has every key, default, limit and error rule.</li>
+  <li><code>Documentation/driver-api/ctlv.rst</code> shows how to implement a family's callbacks, hooks and events in a driver.</li>
+  <li><code>Documentation/userspace-api/ctlv.rst</code> documents the wire format and the discovery protocol.</li>
+  <li>The real families to read next are <code>ctlv.yaml</code> (the root, showing recursion and events) and <code>ctlv-attestation.yaml</code> (a full family with optional and dynamic operations).</li>
+</ul>
+
+<div class="pager">
+  <a href="index.html">← Overview</a>
+  <a href="reference.html">Reference →</a>
+</div>
+</main>
+</div>
+</body>
+</html>

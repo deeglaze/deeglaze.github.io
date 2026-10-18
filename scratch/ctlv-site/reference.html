@@ -1,0 +1,630 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Reference — CTLV family specifications</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="layout">
+<nav class="side">
+  <a class="brand" href="index.html">CTLV specs</a>
+  <div class="switch">
+    <a href="guide.html">Guide</a>
+    <a class="here" href="reference.html">Reference</a>
+    <a href="netlink.html">Netlink</a>
+  </div>
+  <ol>
+    <li><a href="#files">1. Files</a></li>
+    <li><a href="#syntax">2. Document syntax</a></li>
+    <li><a href="#names">3. Names and selectors</a></li>
+    <li><a href="#family">4. family</a></li>
+    <li><a href="#definitions">5. enums and flags</a></li>
+    <li><a href="#attr-groups">6. attr-groups</a>
+      <ul>
+        <li><a href="#attr-keys">Attr keys</a></li>
+        <li><a href="#attr-int">Integer attrs</a></li>
+        <li><a href="#attr-string">String and binary attrs</a></li>
+        <li><a href="#attr-nest">Nest attrs</a></li>
+        <li><a href="#attr-blob">Blob attrs</a></li>
+      </ul>
+    </li>
+    <li><a href="#attr-sets">7. attr-sets</a></li>
+    <li><a href="#ops">8. ops</a></li>
+    <li><a href="#composition">9. Composition rules</a></li>
+    <li><a href="#ids">10. Identifiers</a></li>
+    <li><a href="#sizes">11. Lengths</a></li>
+    <li><a href="#limits">12. Limits</a></li>
+    <li><a href="#registry">13. Family registry</a></li>
+    <li><a href="#manifest">14. Output manifest</a></li>
+    <li><a href="#abi">15. ABI snapshots</a></li>
+    <li><a href="#generated">16. Generated names</a></li>
+    <li><a href="#tool">17. Tooling</a></li>
+    <li><a href="#root">18. Root family</a></li>
+  </ol>
+</nav>
+<main>
+<h1>Reference: the CTLV specification language</h1>
+<p class="lead">Complete definition of the YAML inputs consumed by <code>tools/ctlv</code>.</p>
+
+<h2 id="files">1. Files</h2>
+<table>
+<tr><th>Path</th><th>Role</th></tr>
+<tr><td><code>Documentation/ctlv/ctlv-schema.yaml</code></td><td>JSON Schema (draft 7) for a family specification.</td></tr>
+<tr><td><code>Documentation/ctlv/ctlv-registry-schema.yaml</code></td><td>JSON Schema for the family registry.</td></tr>
+<tr><td><code>Documentation/ctlv/generated-files-schema.yaml</code></td><td>JSON Schema for the output manifest.</td></tr>
+<tr><td><code>Documentation/ctlv/specs/&lt;family&gt;.yaml</code></td><td>Specification of one family. The file stem is the family name.</td></tr>
+<tr><td><code>Documentation/ctlv/families.yaml</code></td><td>Family registry.</td></tr>
+<tr><td><code>Documentation/ctlv/generated-files.yaml</code></td><td>Output manifest.</td></tr>
+<tr><td><code>Documentation/ctlv/abi/&lt;family&gt;.yaml</code></td><td>ABI snapshot of one family.</td></tr>
+<tr><td><code>Documentation/ctlv/abi/families.registry.yaml</code></td><td>ABI baseline of the registry.</td></tr>
+<tr><td><code>tools/ctlv/ctlvgen/cli.py</code></td><td>Validator, generator and checker entry point.</td></tr>
+<tr><td><code>tools/ctlv/ctlv-regen.sh</code></td><td>Regenerates or checks every manifest output.</td></tr>
+<tr><td><code>tools/ctlv/Makefile</code></td><td>Make targets.</td></tr>
+</table>
+<p>The specification of the root family <code>ctlv</code> is located relative to the meta-schema (<code>specs/ctlv.yaml</code> beside it). The specification of every other family is located in the directory of the specification being loaded.</p>
+<p>Every registry entry has exactly one specification and one ABI snapshot. A specification or snapshot without a registry entry is an error.</p>
+
+<h2 id="syntax">2. Document syntax</h2>
+<h3>YAML subset</h3>
+<p>Each file is a single YAML document whose top level is a mapping. The loader is <code>yaml.SafeLoader</code> with these additional rejections:</p>
+<ul>
+  <li>aliases,</li>
+  <li>anchors,</li>
+  <li>merge keys,</li>
+  <li>explicit tags,</li>
+  <li>duplicate mapping keys,</li>
+  <li>more than one document.</li>
+</ul>
+<h3>Required first line</h3>
+<p>The first line of a specification and of a registry is a comment matching <code>#\s*SPDX-License-Identifier:\s*(\S.*?)\s*$</code>. The captured identifier is the license of every generated file derived from the file.</p>
+<h3>Validation order</h3>
+<ol>
+  <li>YAML subset load.</li>
+  <li>Meta-schema validation (syntax gate).</li>
+  <li>Per-declaration normalization (<code>spec.py</code>).</li>
+  <li>Chain resolution and cross-declaration checks (<code>semantics.py</code>).</li>
+  <li>Generated-name collision check (<code>cgen.symbols</code>).</li>
+</ol>
+<p>Every unknown key is an error at every level (<code>additionalProperties: false</code>).</p>
+
+<h2 id="names">3. Names and selectors</h2>
+<table>
+<tr><th>Kind</th><th>Pattern</th><th>Additional constraint</th></tr>
+<tr><td>name</td><td><code>^[a-z0-9]+(-[a-z0-9]+)*$</code></td><td></td></tr>
+<tr><td>family name</td><td>name</td><td>At most 63 characters.</td></tr>
+<tr><td>selector</td><td><code>^[a-z0-9]+(-[a-z0-9]+)*(\.[a-z0-9]+(-[a-z0-9]+)*)?$</code></td><td>At most one dot.</td></tr>
+</table>
+<p>A dot is reserved for selectors. A name does not contain one.</p>
+
+<h3>Selector forms</h3>
+<table>
+<tr><th>Form</th><th>Selects</th></tr>
+<tr><td><code>group.attr</code></td><td>The one attr <code>attr</code> of group <code>group</code>.</td></tr>
+<tr><td><code>name</code> (a group)</td><td>Every attr of the group, in declaration order, as required placements unless selected optionally.</td></tr>
+<tr><td><code>name</code> (an attr set)</td><td>The required and optional members of the set.</td></tr>
+</table>
+<p>A selector without a dot is resolved as a group first and as an attr set second. Group names and attr set names share one namespace and are never equal. There are no tuple selectors and no family-qualified selectors.</p>
+<p>A field typed <em>selectors</em> accepts one selector string or a non-empty array of selector strings.</p>
+
+<h3>Namespaces</h3>
+<table>
+<tr><th>Namespace</th><th>Scope</th><th>Members</th></tr>
+<tr><td>Definitions</td><td>Inheritance chain</td><td>enum names and flags names, together</td></tr>
+<tr><td>Groups and sets</td><td>Inheritance chain</td><td>attr group names and attr set names, together</td></tr>
+<tr><td>Attrs</td><td>One group</td><td>attr names</td></tr>
+<tr><td>Ops</td><td>Inheritance chain</td><td>op names</td></tr>
+<tr><td>Values</td><td>One enum or flags definition</td><td>value names</td></tr>
+</table>
+<p>Redeclaring a name in the same namespace is an error, except that a descendant declares an inherited <code>stub</code> attr set once to fill it (<a href="#stubs">stubs</a>).</p>
+
+<h2 id="family">4. family</h2>
+<p>Required. Mapping with these keys.</p>
+<table>
+<tr><th>Key</th><th>Type</th><th>Default</th><th>Definition</th></tr>
+<tr><td><code>name</code></td><td>family name</td><td>required</td><td>Registered name. Equals the file stem of the specification.</td></tr>
+<tr><td><code>inherits</code></td><td>family name</td><td>none</td><td>The single direct parent.</td></tr>
+<tr><td><code>pre-init</code></td><td>boolean</td><td><code>false</code></td><td>The family implements the generated pre-init callback, which translates its init information for its parent. Without it, the parent receives <code>NULL</code>.</td></tr>
+<tr><td><code>post-init</code></td><td>boolean</td><td><code>false</code></td><td>The family implements the generated post-init callback, run after every family priv is initialized.</td></tr>
+<tr><td><code>pre-fini</code></td><td>boolean</td><td><code>false</code></td><td>The family implements the generated pre-fini callback, run before any family priv is finalized.</td></tr>
+</table>
+<h3>Rules</h3>
+<ul>
+  <li>The root family is named <code>ctlv</code>, holds family ID 0, and does not declare <code>inherits</code>.</li>
+  <li>Every other family declares <code>inherits</code>.</li>
+  <li>A family that inherits <code>P</code> is named <code>P-&lt;suffix&gt;</code> with a non-empty suffix.</li>
+  <li>A parent is registered at a lower index than every family inheriting it.</li>
+  <li>An inheritance cycle is an error.</li>
+  <li>The effective schema of a family is the union of the declarations of its chain, root first. Inherited definitions keep their IDs.</li>
+  <li><code>pre-init</code>, <code>post-init</code> and <code>pre-fini</code> are ABI snapshot members.</li>
+</ul>
+
+<h2 id="definitions">5. enums and flags</h2>
+<p>Each of <code>enums</code> and <code>flags</code> is an optional array with at least one element. An element is a mapping:</p>
+<table>
+<tr><th>Key</th><th>Type</th><th>Definition</th></tr>
+<tr><td><code>name</code></td><td>name</td><td>Definition name.</td></tr>
+<tr><td><code>values</code></td><td>array of name, at least one</td><td>Value names in declaration order. Names are unique within the definition.</td></tr>
+</table>
+<table>
+<tr><th></th><th>enum</th><th>flags</th></tr>
+<tr><td>Numbering</td><td>From 1, in declaration order. 0 is reserved.</td><td>Bit 0 upward, in declaration order.</td></tr>
+<tr><td>Maximum values</td><td>4294967295</td><td>64</td></tr>
+<tr><td>Payload</td><td>Unsigned 64-bit</td><td>Unsigned 64-bit mask</td></tr>
+<tr><td>Mutation</td><td>Append-only.</td><td>Append-only.</td></tr>
+</table>
+<p>An attr references a definition by name with <code>enum</code> or <code>flags</code>. The referenced definition is declared in the same family or an ancestor, and has the matching kind.</p>
+
+<h2 id="attr-groups">6. attr-groups</h2>
+<p>Optional array, 1 to 65535 elements per family. An element is a mapping:</p>
+<table>
+<tr><th>Key</th><th>Type</th><th>Definition</th></tr>
+<tr><td><code>name</code></td><td>name</td><td>Group name. Also the generated symbol prefix of its attrs.</td></tr>
+<tr><td><code>attrs</code></td><td>array of attr, 1 to 4294967295</td><td>Attr declarations in ID order. Attr names are unique within the group.</td></tr>
+</table>
+
+<h3 id="attr-keys">Attr keys</h3>
+<p>An attr declares <code>name</code> and exactly one primary form key out of <code>type</code>, <code>enum</code>, <code>flags</code>, <code>attrs</code>, <code>blob</code>. Zero or more than one primary form keys is an error.</p>
+<table>
+<tr><th>Key</th><th>Type</th><th>Applies to</th></tr>
+<tr><td><code>name</code></td><td>name</td><td>all</td></tr>
+<tr><td><code>type</code></td><td><code>uint</code> | <code>sint</code> | <code>bool</code> | <code>string</code> | <code>binary</code></td><td>primary form</td></tr>
+<tr><td><code>enum</code></td><td>name of an enum</td><td>primary form</td></tr>
+<tr><td><code>flags</code></td><td>name of a flags definition</td><td>primary form</td></tr>
+<tr><td><code>attrs</code></td><td>selectors</td><td>primary form (nest)</td></tr>
+<tr><td><code>blob</code></td><td>blob mapping</td><td>primary form</td></tr>
+<tr><td><code>max-occurrences</code></td><td>integer 1 to 4294967295, or <code>unlimited</code></td><td>all</td></tr>
+<tr><td><code>min</code>, <code>max</code></td><td>integer</td><td><code>uint</code>, <code>sint</code></td></tr>
+<tr><td><code>unit</code>, <code>scale</code></td><td>unit, integer</td><td><code>uint</code>, <code>sint</code></td></tr>
+<tr><td><code>length</code></td><td>integer 0 to 4294967295</td><td><code>binary</code></td></tr>
+<tr><td><code>min-length</code>, <code>max-length</code></td><td>integer 0 to 4294967295</td><td><code>string</code>, <code>binary</code></td></tr>
+<tr><td><code>optional-attrs</code></td><td>selectors</td><td>nest</td></tr>
+<tr><td><code>recursive</code></td><td><code>true</code></td><td>nest</td></tr>
+</table>
+<p>A key that does not apply to the attr's form is an error. <code>max-occurrences</code> defaults to 1.</p>
+
+<h3>Payload forms</h3>
+<table>
+<tr><th>Form</th><th>Payload</th><th>Maximum payload length</th></tr>
+<tr><td><code>uint</code>, <code>sint</code>, <code>enum</code>, <code>flags</code></td><td>64-bit integer</td><td>8</td></tr>
+<tr><td><code>bool</code></td><td>One byte, 0 or 1</td><td>1</td></tr>
+<tr><td><code>string</code></td><td>Characters and a terminating NUL</td><td><code>max-length</code> + 1</td></tr>
+<tr><td><code>binary</code></td><td>Bytes</td><td><code>max-length</code></td></tr>
+<tr><td>nest</td><td>Child attrs</td><td>Sum of the children</td></tr>
+<tr><td><code>blob</code></td><td>Descriptor nest</td><td>3 × 24 for backing <code>va</code></td></tr>
+</table>
+
+<h3 id="attr-int">Integer attrs</h3>
+<table>
+<tr><th>Key</th><th>Default</th><th>Definition</th></tr>
+<tr><td><code>min</code></td><td>type minimum</td><td>Inclusive lower bound.</td></tr>
+<tr><td><code>max</code></td><td>type maximum</td><td>Inclusive upper bound.</td></tr>
+<tr><td><code>unit</code></td><td>none</td><td>One of <code>seconds</code>, <code>hertz</code>, <code>bytes</code>, <code>celsius</code>.</td></tr>
+<tr><td><code>scale</code></td><td><code>0</code> when <code>unit</code> is present</td><td>Decimal exponent, −128 to 127. Requires <code>unit</code>.</td></tr>
+</table>
+<table>
+<tr><th>Type</th><th>Range</th></tr>
+<tr><td><code>uint</code></td><td>0 to 18446744073709551615</td></tr>
+<tr><td><code>sint</code></td><td>−9223372036854775808 to 9223372036854775807</td></tr>
+</table>
+<p><code>min</code> and <code>max</code> lie in the type's range, and <code>min</code> ≤ <code>max</code>.</p>
+
+<h3 id="attr-string">String and binary attrs</h3>
+<table>
+<tr><th>Form</th><th>Keys</th></tr>
+<tr><td><code>string</code></td><td><code>max-length</code> is required. <code>min-length</code> defaults to 0. Lengths exclude the terminator. <code>min-length</code> ≤ <code>max-length</code>.</td></tr>
+<tr><td><code>binary</code></td><td>Either <code>length</code> alone, which sets minimum and maximum to the same value, or <code>max-length</code> with an optional <code>min-length</code> (default 0). <code>length</code> is not combined with <code>min-length</code> or <code>max-length</code>. One of <code>length</code> and <code>max-length</code> is required. <code>min-length</code> ≤ <code>max-length</code>.</td></tr>
+</table>
+
+<h3 id="attr-nest">Nest attrs</h3>
+<table>
+<tr><th>Key</th><th>Definition</th></tr>
+<tr><td><code>attrs</code></td><td>Selectors of the required members.</td></tr>
+<tr><td><code>optional-attrs</code></td><td>Selectors of the optional members.</td></tr>
+<tr><td><code>recursive</code></td><td>The nest may contain its own attr again at any depth.</td></tr>
+</table>
+<ul>
+  <li>A nest chain is at most 31 levels deep.</li>
+  <li>A nesting cycle through non-recursive nests is an error.</li>
+</ul>
+<h4>Recursive nests</h4>
+<ul>
+  <li><code>attrs</code> holds exactly one selector.</li>
+  <li>That selector names an attr set. A group name and a <code>group.attr</code> selector are errors.</li>
+  <li><code>optional-attrs</code> is not declared.</li>
+  <li>The named attr set selects the nest's own attr, directly or through nested attrs.</li>
+  <li>A re-entry is reported by the node with <code>reenters</code> and no members.</li>
+  <li>Only a query reply contains a recursive nest.</li>
+</ul>
+
+<h3 id="attr-blob">Blob attrs</h3>
+<table>
+<tr><th>Key</th><th>Type</th><th>Default</th><th>Definition</th></tr>
+<tr><td><code>direction</code></td><td><code>input</code> | <code>output</code> | <code>inout</code></td><td>required</td><td>How the family uses the described memory.</td></tr>
+<tr><td><code>allowed-backings</code></td><td>non-empty unique array of <code>va</code></td><td>required</td><td>Accepted backing types. <code>va</code> is the only value.</td></tr>
+<tr><td><code>max-length</code></td><td>integer 1 to 18446744073709551615</td><td>required</td><td>Maximum external payload length. Independent of the inline message limit.</td></tr>
+<tr><td><code>alignment</code></td><td>integer 1 to 4294967295</td><td><code>1</code></td><td>Required alignment of the described address or offset.</td></tr>
+</table>
+<ul>
+  <li><code>alignment</code> is a power of two.</li>
+  <li><code>max-length</code> is a multiple of <code>alignment</code>.</li>
+  <li>Only a request contains a blob attr.</li>
+</ul>
+
+<h2 id="attr-sets">7. attr-sets</h2>
+<p>Optional array. An element is a mapping:</p>
+<table>
+<tr><th>Key</th><th>Type</th><th>Definition</th></tr>
+<tr><td><code>name</code></td><td>name</td><td>Set name.</td></tr>
+<tr><td><code>stub</code></td><td><code>true</code></td><td>Declares an extension point.</td></tr>
+<tr><td><code>attrs</code></td><td>selectors</td><td>Required members.</td></tr>
+<tr><td><code>optional-attrs</code></td><td>selectors</td><td>Optional members.</td></tr>
+</table>
+<ul>
+  <li>A set is either a stub with no members, or has at least one member in <code>attrs</code> or <code>optional-attrs</code>.</li>
+  <li>A set selecting itself, directly or through other sets, is an error.</li>
+  <li>Every set is expanded and checked whether or not an op selects it.</li>
+  <li>Set IDs are assigned from 1 per family, in declaration order, counting only sets not filling an inherited stub.</li>
+</ul>
+
+<h3 id="stubs">Stubs</h3>
+<ul>
+  <li>A stub has no members and expands to nothing until filled.</li>
+  <li>A descendant fills an inherited stub by declaring an attr set with the same name and at least one member.</li>
+  <li>A fill is made at most once in an inheritance chain.</li>
+  <li>A fill is not itself a stub.</li>
+  <li>Only a stub is filled. A name already declared as a non-stub set by an ancestor is an error.</li>
+  <li>The filled set keeps the ID given by the family that declared the stub.</li>
+  <li>A fill contains no recursive attr.</li>
+  <li>An attr set that a message root built by the core uses does not select a stub.</li>
+  <li>A query reply that selects a stub does not also contain a re-entry.</li>
+</ul>
+
+<h2 id="ops">8. ops</h2>
+<p>Optional array, at most 4294967295 elements per family. An element is a mapping:</p>
+<table>
+<tr><th>Key</th><th>Type</th><th>Default</th><th>Applies to</th><th>Definition</th></tr>
+<tr><td><code>name</code></td><td>name</td><td>required</td><td>all</td><td>Op name.</td></tr>
+<tr><td><code>type</code></td><td><code>action</code> | <code>query</code> | <code>event</code></td><td>required</td><td>all</td><td>An action is invoked once and does not fragment. A query may fragment its reply. An event is an unsolicited reply-only message.</td></tr>
+<tr><td><code>fd-access</code></td><td><code>read</code> | <code>read-write</code></td><td><code>read-write</code></td><td>action, query</td><td><code>read</code> is executable through an observation fd. <code>read-write</code> requires a full-control fd. Events are always readable.</td></tr>
+<tr><td><code>availability</code></td><td><code>fixed</code> | <code>dynamic</code></td><td><code>fixed</code></td><td>action, query</td><td><code>dynamic</code> permits the family to enable and disable the op per device. Every device starts with a dynamic op enabled. A disabled op remains in introspection and returns <code>-EOPNOTSUPP</code>.</td></tr>
+<tr><td><code>optional</code></td><td>boolean</td><td><code>false</code></td><td>action, query</td><td>When true, the op exists on a device only if family initialization opts in before publication. An op not opted in is absent from introspection.</td></tr>
+<tr><td><code>pre-post</code></td><td>boolean</td><td><code>false</code></td><td>action, query</td><td>The op has a generated pre/post hook pair implemented by its declaring family. Kernel implementation metadata, absent from UAPI and introspection.</td></tr>
+<tr><td><code>request</code></td><td>placements</td><td>root with no children</td><td>action, query</td><td>Request root.</td></tr>
+<tr><td><code>reply</code></td><td>placements</td><td>see below</td><td>all</td><td>Reply root.</td></tr>
+<tr><td><code>suggested-reply-length</code></td><td>integer 1 to 1048576</td><td>see <a href="#sizes">lengths</a></td><td>query</td><td>Initial reply buffer length.</td></tr>
+</table>
+
+<h3>Placements</h3>
+<p>A mapping with at least one of the keys <code>attrs</code> and <code>optional-attrs</code>, each holding selectors. An empty mapping is an error.</p>
+
+<h3>Per-type rules</h3>
+<table>
+<tr><th></th><th>action</th><th>query</th><th>event</th></tr>
+<tr><td><code>request</code></td><td>allowed</td><td>allowed</td><td>not allowed</td></tr>
+<tr><td><code>reply</code> omitted</td><td>acknowledgement only</td><td>not allowed</td><td>root with no children</td></tr>
+<tr><td><code>fd-access</code></td><td>allowed</td><td>allowed</td><td>not allowed</td></tr>
+<tr><td><code>availability</code></td><td>allowed</td><td>allowed</td><td>not allowed</td></tr>
+<tr><td><code>optional</code></td><td>allowed</td><td>allowed</td><td>not allowed</td></tr>
+<tr><td><code>pre-post</code></td><td>allowed</td><td>allowed</td><td>not allowed</td></tr>
+<tr><td><code>suggested-reply-length</code></td><td>not allowed</td><td>allowed</td><td>not allowed</td></tr>
+</table>
+
+<h3>Message contexts</h3>
+<table>
+<tr><th>Construct</th><th>request</th><th>action reply</th><th>query reply</th><th>event</th></tr>
+<tr><td><code>max-occurrences: unlimited</code></td><td>no</td><td>no</td><td>yes</td><td>no</td></tr>
+<tr><td>re-entry of a recursive nest</td><td>no</td><td>no</td><td>yes</td><td>no</td></tr>
+<tr><td>blob attr</td><td>yes</td><td>no</td><td>no</td><td>no</td></tr>
+</table>
+
+<h2 id="composition">9. Composition rules</h2>
+<h3>Expansion of a selection</h3>
+<ul>
+  <li>A selection in <code>attrs</code> yields required placements. A selection in <code>optional-attrs</code> yields optional placements.</li>
+  <li>When an attr set or group is selected optionally, every member becomes optional.</li>
+  <li>When one attr is selected more than once at one level, the selections merge into one placement. A required selection takes precedence over an optional one.</li>
+  <li>Selecting one attr both through a filled stub set and outside it at one level is an error.</li>
+  <li>After fills are composed, every attr ID at one nesting level has exactly one placement. A second placement is an error.</li>
+</ul>
+<h3>Stub selection</h3>
+<ul>
+  <li>A stub selected optionally makes every member of its fill optional.</li>
+  <li>One reference is kept per stub selected at a level. A required reference takes precedence over an optional one.</li>
+</ul>
+<h3>Structural checks</h3>
+<ul>
+  <li>A selector that matches no attr, group or set is an error.</li>
+  <li>The per-op request tree and reply tree are checked individually.</li>
+  <li>The composed tree of each op (fills spliced in) is checked against the limits of <a href="#limits">section 12</a>.</li>
+</ul>
+
+<h2 id="ids">10. Identifiers</h2>
+<table>
+<tr><th>Identifier</th><th>Value</th></tr>
+<tr><td>Family ID</td><td>Zero-based index of the family name in <code>families.yaml</code>.</td></tr>
+<tr><td>Group ID</td><td>1-based position of the group in the family's <code>attr-groups</code>.</td></tr>
+<tr><td>Local attr ID</td><td>1-based position of the attr in its group.</td></tr>
+<tr><td>Attr ID</td><td>(family ID &lt;&lt; 48) | (group ID &lt;&lt; 32) | local attr ID</td></tr>
+<tr><td>Local op ID</td><td>1-based position of the op in the family's <code>ops</code>.</td></tr>
+<tr><td>Op ID</td><td>(family ID &lt;&lt; 48) | local op ID</td></tr>
+<tr><td>Set ID</td><td>1-based counter per family; see <a href="#attr-sets">attr-sets</a>.</td></tr>
+<tr><td>Enum value</td><td>1-based position in <code>values</code>.</td></tr>
+<tr><td>Flag bit</td><td>0-based position in <code>values</code>.</td></tr>
+</table>
+<p>An ID is part of the ABI for the life of the family.</p>
+
+<h2 id="sizes">11. Lengths</h2>
+<h3>Constants</h3>
+<table>
+<tr><th>Name</th><th>Value</th></tr>
+<tr><td>Alignment (<code>CTLV_ALIGNTO</code>)</td><td>8</td></tr>
+<tr><td>Attr header length</td><td>16</td></tr>
+<tr><td>Event record header length</td><td>24</td></tr>
+<tr><td><code>CTLV_MAX_INLINE_MESSAGE_LEN</code></td><td>0x100000</td></tr>
+<tr><td><code>CTLV_MAX_ERROR_LEN</code></td><td>0x4000</td></tr>
+<tr><td><code>CTLV_MAX_NEST_DEPTH</code></td><td>32</td></tr>
+<tr><td><code>CTLV_DEFAULT_QUERY_REPLY_LEN</code></td><td>0x10000</td></tr>
+<tr><td><code>CTLV_MAX_EVENT_QUEUE_LEN</code></td><td>0x1000000</td></tr>
+</table>
+<p>The declared nest depth limit is <code>CTLV_MAX_NEST_DEPTH</code> − 1 = 31.</p>
+
+<h3>Formulas</h3>
+<p><code>align(n)</code> rounds <code>n</code> up to a multiple of 8.</p>
+<table>
+<tr><th>Quantity</th><th>Definition</th></tr>
+<tr><td>Attr maximum length</td><td>16 + payload maximum length</td></tr>
+<tr><td>Root maximum length</td><td>16 + sum of children</td></tr>
+<tr><td>Children sum</td><td>Σ <code>max-occurrences</code> × <code>align</code>(attr maximum length) over members</td></tr>
+<tr><td>Blob payload maximum length</td><td>(largest descriptor attr count over <code>allowed-backings</code>) × <code>align</code>(24); <code>va</code> counts 3</td></tr>
+<tr><td><code>request-max-len</code></td><td>Root maximum length of the request.</td></tr>
+<tr><td><code>action-reply-max-len</code></td><td>Root maximum length of the reply of an action with a reply.</td></tr>
+<tr><td><code>event-record-max-len</code></td><td>24 + <code>align</code>(root maximum length of the event reply)</td></tr>
+<tr><td><code>query-reply-min-len</code></td><td>Maximum over the leaves of the reply tree of 16 × (number of ancestors including the root) + <code>align</code>(leaf attr maximum length). A tree that contains a re-entry uses 33 × 16 + <code>align</code>(attr maximum length) of the largest non-nest placement.</td></tr>
+<tr><td><code>query-reply-suggested-len</code></td><td>With <code>suggested-reply-length</code> declared: that value. Otherwise the larger of <code>CTLV_DEFAULT_QUERY_REPLY_LEN</code> and <code>query-reply-min-len</code>. For a composed family, the larger of the declared value and the composed minimum.</td></tr>
+</table>
+
+<h3>Checks</h3>
+<ul>
+  <li>Each of <code>request-max-len</code>, <code>action-reply-max-len</code>, the event payload maximum length and <code>query-reply-min-len</code> is at most <code>CTLV_MAX_INLINE_MESSAGE_LEN</code>.</li>
+  <li>A declared <code>suggested-reply-length</code> is at least <code>query-reply-min-len</code> and at most <code>CTLV_MAX_INLINE_MESSAGE_LEN</code>.</li>
+  <li><code>event-record-max-len</code> is at most <code>CTLV_MAX_EVENT_QUEUE_LEN</code>.</li>
+  <li>A core-built message root has a maximum length of at most its limit (<code>error-info</code>: <code>CTLV_MAX_ERROR_LEN</code>).</li>
+</ul>
+
+<h2 id="limits">12. Limits</h2>
+<table>
+<tr><th>Item</th><th>Limit</th></tr>
+<tr><td>Family name length</td><td>63 characters</td></tr>
+<tr><td>Registry entries</td><td>65536 (family IDs 0 to 65535)</td></tr>
+<tr><td>Attr groups per family</td><td>65535</td></tr>
+<tr><td>Attrs per group</td><td>4294967295</td></tr>
+<tr><td>Attr sets per family</td><td>4294967295 new sets</td></tr>
+<tr><td>Ops per family</td><td>4294967295</td></tr>
+<tr><td>Effective ops of a chain</td><td>4294967295</td></tr>
+<tr><td>Enum values</td><td>4294967295</td></tr>
+<tr><td>Flag bits</td><td>64</td></tr>
+<tr><td><code>max-occurrences</code></td><td>4294967295</td></tr>
+<tr><td>Declared nest depth</td><td>31</td></tr>
+<tr><td>Composed required attrs per level</td><td>4294967295</td></tr>
+<tr><td>Composed optional attrs per level</td><td>4294967295</td></tr>
+<tr><td>Schema nodes per tree</td><td>4294967295</td></tr>
+<tr><td>Stub references per tree</td><td>4294967295</td></tr>
+<tr><td>Composed schema nodes per op (request plus reply)</td><td>4294967295</td></tr>
+<tr><td>Stub fills per family</td><td>4294967295</td></tr>
+<tr><td><code>suggested-reply-length</code></td><td>1 to 1048576</td></tr>
+</table>
+
+<h2 id="registry">13. Family registry</h2>
+<p><code>Documentation/ctlv/families.yaml</code>. Top-level key <code>families</code>: an array of 1 to 65536 elements.</p>
+<table>
+<tr><th>Element form</th><th>Meaning</th></tr>
+<tr><td>name string (at most 63 characters, name pattern)</td><td>A registered family.</td></tr>
+<tr><td>mapping with <code>name</code> and <code>deprecated: true</code></td><td>A deprecated family. Its ID stays reserved.</td></tr>
+</table>
+<ul>
+  <li>The array index is the family ID.</li>
+  <li>The first entry is <code>ctlv</code> and is not deprecated.</li>
+  <li>Each family appears after the family it inherits.</li>
+  <li>Names are unique.</li>
+  <li>Entries are never reordered, removed, renamed or reused.</li>
+  <li>Every entry has a specification and a snapshot.</li>
+</ul>
+
+<h2 id="manifest">14. Output manifest</h2>
+<p><code>Documentation/ctlv/generated-files.yaml</code>. Root keys, all required:</p>
+<table>
+<tr><th>Key</th><th>Type</th><th>Definition</th></tr>
+<tr><td><code>version</code></td><td><code>1</code></td><td>Manifest version.</td></tr>
+<tr><td><code>registry</code></td><td>mapping</td><td><code>source</code> (path of the registry) and <code>outputs.uapi-header</code> (path, required).</td></tr>
+<tr><td><code>families</code></td><td>array, at least one</td><td>One mapping per generated family.</td></tr>
+</table>
+<p>A <code>families</code> element:</p>
+<table>
+<tr><th>Key</th><th>Required</th><th>Definition</th></tr>
+<tr><td><code>name</code></td><td>yes</td><td>Family name.</td></tr>
+<tr><td><code>source</code></td><td>yes</td><td>Path of the specification.</td></tr>
+<tr><td><code>outputs</code></td><td>yes</td><td>Mapping with at least one of <code>uapi-header</code>, <code>kernel-header</code>, <code>kernel-source</code>.</td></tr>
+</table>
+<p>Paths are non-empty, relative to the kernel tree root, and do not begin with <code>/</code>.</p>
+
+<h2 id="abi">15. ABI snapshots</h2>
+<p>A snapshot records one family's own declarations: family flags, ID and parent; definitions with value numbers; groups with attr IDs and constraints; sets; stub fills; and ops with their request and reply trees. It is written by <code>--abi-update</code> and compared by <code>--abi-check</code>.</p>
+
+<h3>Compared members</h3>
+<table>
+<tr><th>Declaration</th><th>Rule</th></tr>
+<tr><td>Family</td><td>Name, ID, parent, <code>pre-init</code>, <code>post-init</code>, <code>pre-fini</code> are unchanged.</td></tr>
+<tr><td>Enum, flags</td><td>Not removed. Kind unchanged. Each existing value remains present with the same number.</td></tr>
+<tr><td>Attr group</td><td>Not removed. Group ID unchanged.</td></tr>
+<tr><td>Attr</td><td>Not removed. Local ID, kind, referenced definition, <code>unit</code> and <code>scale</code> unchanged.</td></tr>
+<tr><td>Attr bounds</td><td><code>min</code> and <code>min-length</code> do not increase. <code>max</code> and <code>max-length</code> do not decrease.</td></tr>
+<tr><td><code>max-occurrences</code></td><td>Does not decrease, and does not change from <code>unlimited</code> to a finite value.</td></tr>
+<tr><td>Blob</td><td><code>direction</code> and <code>alignment</code> unchanged. No <code>allowed-backings</code> removed. <code>max-length</code> does not decrease.</td></tr>
+<tr><td>Attr set</td><td>Not removed. Set ID and <code>stub</code> unchanged.</td></tr>
+<tr><td>Stub fill</td><td>Not removed. Compared as a node list.</td></tr>
+<tr><td>Op</td><td>Not removed. <code>op-id</code>, <code>type</code>, <code>fd-access</code>, <code>availability</code>, <code>optional</code> and <code>pre-post</code> unchanged.</td></tr>
+<tr><td>Op request, reply</td><td>Present schema not removed. An action without a reply does not gain one. Compared as a node list.</td></tr>
+<tr><td>Node list</td><td>No node removed. No node changes from optional to required. <code>reenters</code> unchanged. A node added since the snapshot is optional.</td></tr>
+</table>
+<p>Adding an attr, group, set, op, enum value or flag bit, or making a required placement optional, is compatible.</p>
+
+<h3>Registry baseline</h3>
+<p><code>abi/families.registry.yaml</code> records the ordered registry. The check fails when:</p>
+<ul>
+  <li>an entry of the baseline is missing from the registry,</li>
+  <li>the name at an index differs,</li>
+  <li>a deprecated entry is no longer deprecated,</li>
+  <li>the registry differs from the baseline in any other way (<code>--abi-check</code> and <code>--outputs-check</code>), which requires updating the baseline.</li>
+</ul>
+
+<h2 id="generated">16. Generated names</h2>
+<p>Let <code>F</code> be the family name with dashes replaced by underscores (upper case in macros), and <code>X-Y</code> a YAML name rendered as <code>X_Y</code>.</p>
+<table>
+<tr><th>Declaration</th><th>Name</th></tr>
+<tr><td>Family number</td><td><code>CTLV_FAMILY_&lt;S&gt;</code>, where <code>S</code> is the family name without a leading <code>ctlv-</code>; <code>CTLV_FAMILY_ROOT</code> for <code>ctlv</code></td></tr>
+<tr><td>Group</td><td><code>&lt;F&gt;_GROUP_&lt;GROUP&gt;</code></td></tr>
+<tr><td>Attr</td><td><code>&lt;F&gt;_ATTR_&lt;GROUP&gt;_&lt;ATTR&gt;</code> (complete ID)</td></tr>
+<tr><td>Set</td><td><code>&lt;F&gt;_SET_&lt;SET&gt;</code></td></tr>
+<tr><td>Op</td><td><code>&lt;F&gt;_OP_&lt;OP&gt;</code> (complete ID)</td></tr>
+<tr><td>Enum value</td><td><code>&lt;F&gt;_&lt;ENUM&gt;_&lt;VALUE&gt;</code></td></tr>
+<tr><td>Flag bit</td><td><code>&lt;F&gt;_&lt;FLAGS&gt;_&lt;VALUE&gt;_BIT</code></td></tr>
+<tr><td>Flag mask</td><td><code>&lt;F&gt;_&lt;FLAGS&gt;_&lt;VALUE&gt;</code> and <code>&lt;F&gt;_&lt;FLAGS&gt;_MASK</code></td></tr>
+</table>
+<p>In the root family, <code>F</code> is <code>CTLV</code>.</p>
+<ul>
+  <li>Two declarations that generate the same C name are an error, as is a collision with a lifecycle API symbol or a symbol of an ancestor family.</li>
+  <li>A generated UAPI header includes the UAPI header of its parent.</li>
+  <li>Each generated file begins with the license of its specification and a marker naming the specification it is generated from.</li>
+</ul>
+
+<h2 id="tool">17. Tooling</h2>
+<p>Dependencies: <code>pyyaml 6.*</code>, <code>jsonschema 4.*</code>.</p>
+
+<h3>Make targets</h3>
+<p>Run as <code>make -C tools/ctlv &lt;target&gt;</code>.</p>
+<table>
+<tr><th>Target</th><th>Action</th></tr>
+<tr><td><code>all</code></td><td><code>validate</code> and <code>abi-check</code>.</td></tr>
+<tr><td><code>validate</code></td><td>Validates every specification in <code>specs/</code>.</td></tr>
+<tr><td><code>abi-check</code></td><td>Checks every specification against its snapshot.</td></tr>
+<tr><td><code>abi-update</code></td><td>Rewrites every snapshot.</td></tr>
+<tr><td><code>regen</code></td><td>Runs <code>ctlv-regen.sh</code>, which writes every manifest output.</td></tr>
+<tr><td><code>check-regen</code></td><td>Fails when a checked-in output differs from generator output. Writes nothing.</td></tr>
+<tr><td><code>lint</code></td><td>Runs yamllint, pycodestyle and pyflakes.</td></tr>
+<tr><td><code>clean</code></td><td>Removes Python caches and build directories.</td></tr>
+</table>
+
+<h3><code>cli.py</code> options</h3>
+<p><code>--spec PATH</code> is required. Exactly one action is required.</p>
+<table>
+<tr><th>Option</th><th>Definition</th></tr>
+<tr><td><code>--spec PATH</code></td><td>Specification to load.</td></tr>
+<tr><td><code>--schema PATH</code></td><td>Meta-schema. Default: <code>ctlv-schema.yaml</code> beside <code>specs/</code>.</td></tr>
+<tr><td><code>--registry PATH</code></td><td>Registry. Default: <code>families.yaml</code> beside <code>specs/</code>.</td></tr>
+<tr><td><code>--abi DIR</code></td><td>Snapshot directory. Default: <code>abi/</code> beside <code>specs/</code>.</td></tr>
+<tr><td><code>--validate</code></td><td>Validates the specification and its chain, and the generated-name check.</td></tr>
+<tr><td><code>--abi-check</code></td><td>Checks the registry baseline and the family snapshot.</td></tr>
+<tr><td><code>--abi-update</code></td><td>Rewrites the family snapshot.</td></tr>
+<tr><td><code>--tree-check</code></td><td>Checks registry, specifications, snapshots and manifest coverage.</td></tr>
+<tr><td><code>--tree-check-update</code></td><td>Checks whole-tree inputs before an ABI update. Snapshots for appended registry entries may be missing.</td></tr>
+<tr><td><code>--registry-abi-update</code></td><td>Rewrites the registry baseline. Requires complete snapshots.</td></tr>
+<tr><td><code>--outputs-check</code></td><td>Checks every manifest output.</td></tr>
+<tr><td><code>--outputs-update</code></td><td>Regenerates every manifest output.</td></tr>
+<tr><td><code>--mode uapi|kernel</code></td><td>Generates one file. Requires <code>--header</code> or <code>--source</code>.</td></tr>
+<tr><td><code>--header</code>, <code>--source</code></td><td>Selects the file kind of <code>--mode</code>. Mutually exclusive.</td></tr>
+<tr><td><code>--schema-only</code></td><td>With <code>--mode kernel</code>, omits the family API.</td></tr>
+<tr><td><code>-o, --output PATH</code></td><td>Writes to a file instead of standard output. Requires <code>--mode</code>.</td></tr>
+<tr><td><code>--cmp-out</code></td><td>Leaves an unchanged output file untouched. Requires <code>--mode</code> and <code>--output</code>.</td></tr>
+<tr><td><code>--output-root DIR</code></td><td>Alternate destination root. Requires <code>--outputs-check</code> or <code>--outputs-update</code>. Not empty.</td></tr>
+</table>
+<p>Exit status is 0 on success and 1 on a reported error. Each error is printed as <code>ctlvgen: &lt;location&gt;: &lt;message&gt;</code>.</p>
+
+<h3><code>ctlv-regen.sh</code></h3>
+<table>
+<tr><th>Option</th><th>Definition</th></tr>
+<tr><td><code>-f</code></td><td>Accepted and ignored.</td></tr>
+<tr><td><code>-c</code></td><td>Writes nothing and fails on any difference.</td></tr>
+<tr><td><code>-p DIR</code></td><td>Uses DIR as the output root. Not empty.</td></tr>
+</table>
+
+<h3>Whole-tree coverage</h3>
+<ul>
+  <li>Every registry entry has <code>specs/&lt;name&gt;.yaml</code>. A file without an entry is an error.</li>
+  <li>Every registry entry has <code>abi/&lt;name&gt;.yaml</code>. A file without an entry is an error.</li>
+  <li>The registry satisfies its baseline.</li>
+  <li>The output manifest loads and satisfies its schema.</li>
+</ul>
+
+<h2 id="root">18. Root family</h2>
+<p>Family <code>ctlv</code>, family ID 0, specified in <code>specs/ctlv.yaml</code>. Its operations are inherited by every family. Its attr groups are placed inside the messages of other families.</p>
+
+<h3>Requirements on the root specification</h3>
+<ul>
+  <li>It declares the attr set <code>error-info</code>.</li>
+  <li>Entry counts of these root enums are bounded: <code>op-type</code>, <code>op-availability</code>, <code>op-fd-access</code>, <code>blob-direction</code> at most 255; <code>blob-type</code> at most 15.</li>
+</ul>
+
+<h3>Enums</h3>
+<table>
+<tr><th>Enum</th><th>Values (1, 2, …)</th></tr>
+<tr><td><code>op-type</code></td><td><code>action</code>, <code>query</code>, <code>event</code></td></tr>
+<tr><td><code>op-availability</code></td><td><code>fixed</code>, <code>dynamic</code></td></tr>
+<tr><td><code>blob-type</code></td><td><code>va</code></td></tr>
+<tr><td><code>blob-direction</code></td><td><code>input</code>, <code>output</code>, <code>inout</code></td></tr>
+<tr><td><code>validation-reason</code></td><td><code>malformed-message</code>, <code>unknown-attr</code>, <code>unknown-flag</code>, <code>nesting-too-deep</code>, <code>missing-attr</code>, <code>too-many-occurrences</code>, <code>value-out-of-range</code>, <code>bad-length</code>, <code>bad-string</code>, <code>bad-blob-descriptor</code>, <code>stale-generation</code>, <code>noncontiguous-attr</code></td></tr>
+<tr><td><code>op-fd-access</code></td><td><code>read</code>, <code>read-write</code></td></tr>
+</table>
+
+<h3>Attr groups</h3>
+<table>
+<tr><th>Group</th><th>Attrs</th></tr>
+<tr><td><code>family</code> (1)</td><td><code>id</code>, <code>name</code> (string, max-length 63), <code>entry</code> (nest of set <code>family-entry</code>, unlimited)</td></tr>
+<tr><td><code>blob</code> (2)</td><td><code>type</code> (enum <code>blob-type</code>), <code>address</code>, <code>fd</code> (max 2147483647), <code>offset</code>, <code>length</code> (min 1)</td></tr>
+<tr><td><code>error</code> (3)</td><td><code>reason</code> (enum <code>validation-reason</code>), <code>message</code> (string, max-length 255), <code>bad-attr-offset</code>, <code>nest-offset</code>, <code>missing-attr-id</code>, <code>expected-generation</code>, <code>current-generation</code></td></tr>
+<tr><td><code>op</code> (4)</td><td><code>id</code> (min 1), <code>type</code>, <code>availability</code>, <code>disabled</code> (bool), <code>request-max-len</code>, <code>action-reply-max-len</code>, <code>query-reply-min-len</code>, <code>query-reply-suggested-len</code>, <code>event-record-max-len</code>, <code>state-generation</code>, <code>entry</code> (nest of <code>op-entry</code>, unlimited), <code>fd-access</code></td></tr>
+<tr><td><code>schema</code> (5)</td><td><code>attr-id</code>, <code>kind</code>, <code>max-occurrences</code>, <code>min</code>, <code>max</code>, <code>min-length</code>, <code>max-length</code>, <code>flags-mask</code>, <code>unit</code>, <code>scale</code> (sint), <code>blob-direction</code>, <code>blob-backings</code>, <code>blob-max-length</code>, <code>blob-alignment</code>, <code>reenters</code> (min 1), <code>attrs</code> and <code>optional-attrs</code> (recursive nests of <code>schema-node</code>, unlimited), <code>request</code>, <code>reply</code> (nests of <code>schema-node</code>)</td></tr>
+<tr><td><code>event</code> (6)</td><td><code>op-id</code> (min 1, max-occurrences 256), <code>queue-len</code> (unit bytes, 1 to 16777216), <code>queue-used</code> (unit bytes), <code>first-sequence</code>, <code>last-sequence</code>, <code>dropped-count</code></td></tr>
+</table>
+<p>Unless noted, an attr is an unsigned integer (<code>uint</code>) with no bounds.</p>
+
+<h3>Attr sets</h3>
+<table>
+<tr><th>Set</th><th>Required</th><th>Optional</th></tr>
+<tr><td><code>family-entry</code></td><td><code>family.id</code>, <code>family.name</code></td><td></td></tr>
+<tr><td><code>op-entry</code></td><td><code>op.id</code>, <code>op.type</code></td><td><code>op.availability</code>, <code>op.disabled</code>, <code>op.request-max-len</code>, <code>op.action-reply-max-len</code>, <code>op.query-reply-min-len</code>, <code>op.query-reply-suggested-len</code>, <code>op.event-record-max-len</code>, <code>op.fd-access</code></td></tr>
+<tr><td><code>op-schema-request</code></td><td><code>op.id</code></td><td></td></tr>
+<tr><td><code>schema-node</code></td><td><code>schema.attr-id</code>, <code>schema.kind</code>, <code>schema.max-occurrences</code></td><td><code>schema.min</code>, <code>schema.max</code>, <code>schema.min-length</code>, <code>schema.max-length</code>, <code>schema.flags-mask</code>, <code>schema.unit</code>, <code>schema.scale</code>, <code>schema.blob-direction</code>, <code>schema.blob-backings</code>, <code>schema.blob-max-length</code>, <code>schema.blob-alignment</code>, <code>schema.reenters</code>, <code>schema.attrs</code>, <code>schema.optional-attrs</code></td></tr>
+<tr><td><code>op-schema-info</code></td><td></td><td><code>schema.request</code>, <code>schema.reply</code></td></tr>
+<tr><td><code>op-change-info</code></td><td><code>op.id</code>, <code>op.disabled</code>, <code>op.state-generation</code></td><td></td></tr>
+<tr><td><code>error-info</code></td><td></td><td>every <code>error.*</code> attr</td></tr>
+<tr><td><code>event-subscription</code></td><td><code>event.op-id</code></td><td></td></tr>
+<tr><td><code>event-queue-limit</code></td><td><code>event.queue-len</code></td><td></td></tr>
+<tr><td><code>event-queue-state</code></td><td><code>event.queue-len</code>, <code>event.queue-used</code></td><td></td></tr>
+<tr><td><code>event-overflow-info</code></td><td><code>event.first-sequence</code>, <code>event.last-sequence</code>, <code>event.dropped-count</code></td><td></td></tr>
+</table>
+
+<h3>Ops</h3>
+<table>
+<tr><th>ID</th><th>Op</th><th>Type</th><th>fd-access</th><th>Request</th><th>Reply</th></tr>
+<tr><td>1</td><td><code>families-dump</code></td><td>query</td><td>read</td><td></td><td><code>family.entry</code></td></tr>
+<tr><td>2</td><td><code>ops-dump</code></td><td>query</td><td>read</td><td></td><td><code>op.entry</code></td></tr>
+<tr><td>3</td><td><code>op-schema-get</code></td><td>query</td><td>read</td><td><code>op-schema-request</code></td><td><code>op-schema-info</code></td></tr>
+<tr><td>4</td><td><code>subscriptions-add</code></td><td>action</td><td>read</td><td><code>event-subscription</code></td><td>acknowledgement</td></tr>
+<tr><td>5</td><td><code>subscriptions-remove</code></td><td>action</td><td>read</td><td><code>event-subscription</code></td><td>acknowledgement</td></tr>
+<tr><td>6</td><td><code>event-queue-get</code></td><td>query</td><td>read</td><td></td><td><code>event-queue-state</code></td></tr>
+<tr><td>7</td><td><code>event-queue-set</code></td><td>action</td><td>read</td><td><code>event-queue-limit</code></td><td>acknowledgement</td></tr>
+<tr><td>8</td><td><code>op-changed</code></td><td>event</td><td></td><td></td><td><code>op-change-info</code></td></tr>
+<tr><td>9</td><td><code>event-overflow</code></td><td>event</td><td></td><td></td><td><code>event-overflow-info</code></td></tr>
+<tr><td>10</td><td><code>device-removed</code></td><td>event</td><td></td><td></td><td>no children</td></tr>
+</table>
+
+<div class="pager">
+  <a href="guide.html">← Guide</a>
+  <a href="index.html">Overview →</a>
+</div>
+</main>
+</div>
+</body>
+</html>
