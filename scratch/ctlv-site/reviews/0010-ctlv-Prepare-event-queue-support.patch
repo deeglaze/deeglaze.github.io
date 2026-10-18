@@ -1,7 +1,3 @@
-Hi Jiri,
-
-Comments on 0010 inline.
-
 > From b28a15e4805941e1545f45068688823b9ea0f4ff Mon Sep 17 00:00:00 2001
 > From: Jiri Pirko <jiri@nvidia.com>
 > Date: Thu, 15 Oct 2026 16:50:43 +0200
@@ -351,11 +347,6 @@ kzalloc for the rest. Please document, or initialize explicitly.
 > +	struct ctlv_event_record *rec, *next;
 > +
 > +	scoped_guard(spinlock, &cfile->ctlvdev->events_lock)
-
-`ctlv_event_file_exit()` is also the error path of `ctlv_event_file_init()` where
-the node was never added; `list_del_init` on an `INIT_LIST_HEAD` node is fine, just
-noting it is relied upon.
-
 > +		list_del_init(&cfile->node);
 > +
 > +	/* Unreachable records are ours; reserved records free by identity. */
@@ -544,12 +535,11 @@ more appropriate if `panic_on_warn` is a concern.
 > +/* Allocate subscriber records before taking queue spinlocks. */
 > +static void ctlv_event_copies(struct ctlv_op_ctx *ctx, u32 len, struct list_head *spare, u32 wanted)
 
-One full-size allocation per subscriber per event, and the records use
-`ctx->gfp` without `__GFP_ACCOUNT` (the reserved ones above use `GFP_KERNEL_ACCOUNT`).
-A partial allocation failure is silently turned into a per-file overflow, with
-no log. Also 'wanted' is counted in one critical section and consumed in
-another, so subscribers appearing in between are dropped (and counted as lost)
-for an event that could have been delivered. Acceptable, but should be commented.
+Three changes requested in `ctlv_event_copies()` and `ctlv_event_emit()`.
+
+1. Allocate the per-subscriber records with `__GFP_ACCOUNT`, as the reserved records above use `GFP_KERNEL_ACCOUNT`; `ctx->gfp` alone does not charge them.
+2. Log a partial allocation failure: `ctlv_event_copies()` returns silently when an allocation fails, and the subscribers left without a record are then counted as per-file overflow. Add a `pr_warn_ratelimited()`.
+3. Add a comment that `wanted` is counted under one hold of `events_lock` and consumed under another, so a subscriber added in between gets no record and is counted as lost for an event that could have been delivered.
 
 > +{
 > +	const struct ctlv_attr *root = ctx->output.root;
@@ -829,12 +819,11 @@ flag change, but a `mutex_trylock` for !blocking is cheap and correct).
 > +
 > +	if (rec->len > len) {
 
-A zero-length or small buffer yields `-EMSGSIZE` after `take()` has already run
-`ctlv_event_overflow_fill()` (which rebuilds the marker) and `untake()` has to undo
-it. The user-visible minimum read size is never exposed (`queue_get` returns
-queue length/used only); userspace has no way to learn the buffer size it needs
-except by the sizes introspection in the next patch. OK, but note `read()` with
-a too small buffer is not documented in the UAPI hdr comment either.
+Three changes requested for a buffer that is too small.
+
+1. Peek at the head record's length under `events_lock` and return `-EMSGSIZE` without dequeuing it. Today `take()` has already run `ctlv_event_overflow_fill()`, which rebuilds the overflow marker, and `untake()` must undo that and merge the loss epochs back.
+2. Return 0 immediately for a zero-length `read()`. It now waits for an event and then fails with `-EMSGSIZE`.
+3. Document in the UAPI header comment for `struct ctlv_event_hdr` that `read()` needs a buffer of at least `length` bytes, that a smaller one fails with `-EMSGSIZE` and consumes nothing (so `poll()` keeps reporting `EPOLLIN` and a loop with a too-small buffer spins), and that `event_record_max_len` from `ops-dump` (patch 11) gives the size to use.
 
 > +		ctlv_event_queue_untake(cfile, rec);
 > +		ret = -EMSGSIZE;
@@ -874,14 +863,10 @@ a too small buffer is not documented in the UAPI hdr comment either.
 > +/* Validate every ID before changing any subscription. */
 > +static const struct ctlv_op_entry *ctlv_event_subscription_find(struct ctlv_device *ctlvdev,
 
-The comment says 'Validate every ID before changing any subscription' but is
-placed on the helper, not the function doing it. Also in the second loop the
-`find()` result is dereferenced unconditionally (`op->event_index`): safe because ops
-is immutable after publication, but then the double lookup per attribute is
-pure overhead; remember the validated `op_index` in a small on-stack array or
-simply re-parse without re-validation.  Also no bound is placed on the
-number of attributes iterated under the spinlock beyond the message size (up to
-1 MiB of attrs, ~100K iterations with interrupts-enabled spinlock held).
+Two changes requested.
+
+1. Move the "Validate every ID before changing any subscription" comment from `ctlv_event_subscription_find()` to `ctlv_event_subscriptions_set()`, which does the validating.
+2. Do the lookup once. Validate the IDs and collect their `event_index` values into a bitmap outside `events_lock`, then apply it with `bitmap_or()` or `bitmap_andnot()` in one short critical section. This drops the second `find()` per attribute, and it bounds the time under the spinlock, which now covers up to ~100K attributes from a 1 MiB message.
 
 > +								u64 op_id)
 > +{
@@ -959,12 +944,6 @@ never be dispatched without a file. Document/assert that.
 > +	u64 len = ctlv_event_queue_set_event_queue_len_get(request);
 > +
 > +	if (len < ctlvdev->queue_min || len > CTLV_MAX_EVENT_QUEUE_LEN)
-
-`CTLV_MAX_EVENT_QUEUE_LEN` (16 MiB, `GFP_KERNEL_ACCOUNT` per record) is
-per open file and there is no per-user/per-device bound on the number of opens, so
-the limit is per-fd, not global. Memory is accounted to memcg so acceptable, but
-mention it.
-
 > +		return ctlv_op_errorf(ctx, -EINVAL, "event queue length %llu is outside %u..%u",
 > +				      (unsigned long long)len, ctlvdev->queue_min,
 > +				      CTLV_MAX_EVENT_QUEUE_LEN);
@@ -1213,6 +1192,3 @@ Summary of the most serious issues:
    ctlvdev parameter, discarded validation error text, ignored emit return,
    undocumented lock ordering `transition_lock` -> `events_lock`, and the broken
    `guard()` formatting throughout.
-
-Thanks,
-Reviewer

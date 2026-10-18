@@ -1,7 +1,3 @@
-Hi Jiri,
-
-A few review comments on this patch inline below.
-
 > From 88d3df2eb185ae07c628038a6770eaeb1363d5e2 Mon Sep 17 00:00:00 2001
 > From: Jiri Pirko <jiri@nvidia.com>
 > Date: Thu, 15 Oct 2026 16:50:49 +0200
@@ -730,7 +726,11 @@ kzalloc with a caller-provided size rather than `kzalloc_obj(*extend)`; inconsis
 > +	lockdep_assert_held(&att->lock);
 > +	if (att->log->generation == UINT_MAX) {
 
-Behavioral question: at generation == `UINT_MAX` this calls `attestation_stop()` - un-registering the whole attestation instance (all evidence and MR operations then return `-ENODEV`) - because a further journal entry cannot be recorded. That is a drastic, silent, permanent DoS-by-exhaustion: reaching 2^32 extends is slow, but nothing limits the rate or memory. More realistically, the journal is append-only and unbounded in memory: each extend permanently allocates a heap entry (~ 68*N + header bytes) with `GFP_KERNEL` and no `__GFP_ACCOUNT`; any caller allowed to issue `mr_extend` (what is the permission model in 0017?) can exhaust kernel memory. There should be a cap (e.g. configurable max entries) and charge to memcg, or at least this must be called out in the commit message. Also `attestation_stop()` requires the xa spin lock but the instance remains in the xarray; subsequent ops see `-ENODEV` with no log message - add a `pr_warn`/`dev_warn`.
+Decide and document the journal's retention model. Three changes requested.
+
+1. Every `mr_extend` permanently allocates a heap entry (~68*N + header bytes) with `GFP_KERNEL` and no `__GFP_ACCOUNT`, and nothing limits the rate or memory of a caller allowed to extend (what is the permission model in 0017?). Either cap the entries and charge them to memcg, or let userspace acknowledge a generation G so the kernel can trim: keep a base snapshot of the MR values at G plus the entries after it, so a verifier can still replay forward. Entries cannot simply be dropped after one read: a verifier replays every extend since reset to reproduce a quoted value, evidence replies name the journal boundary (`mr.generation`), and `mr-log-get` is how a subscriber recovers after its event queue overflowed.
+2. Say what happens across kexec. IMA carries its measurement list across kexec because TPM PCRs survive it; here the new kernel starts with an empty journal while the RTMRs keep their earlier extends, so replay no longer reproduces them. Carry the journal over, or document that it does not survive.
+3. At `generation == UINT_MAX` this calls `attestation_stop()`, which un-registers the whole instance (all evidence and MR operations then return `-ENODEV`) with no message. Add a `dev_warn()`.
 
 Also `-EOVERFLOW` is returned to userspace for a state that is not a bad argument; `-ENOSPC` would be more conventional, and the first caller to hit it gets an error while `mr_extend` wasn't invoked, OK.
 
@@ -890,6 +890,7 @@ Style: the `container_of()` on const with 'typeof'-less struct name, dereference
 Summary:
 Most serious issues:
 - Unbounded, un-accounted, append-only kernel memory journal (one heap entry per extend, each carrying full `HASH_MAX_DIGESTSIZE`-sized digests); at `UINT_MAX` the whole instance is silently stopped via `attestation_stop()`. Needs a cap / memcg accounting and a log message.
+- No retention model for the journal: it is kept forever in kernel memory with no consumer acknowledgement or trim, and nothing carries it across kexec (IMA does, because TPM PCRs survive kexec), so replaying it against the RTMRs breaks after a kexec. Decide between a cap with memcg accounting and acknowledge-and-trim with a base snapshot of the register values.
 - Documentation claims "infallible publication" and "allocates the complete journal entry and event before invoking `mr_extend`", but event emission/encoding can fail (only `pr_err`) and the xarray slot is reserved after prepare, inside `extend_locked`. Event size vs MR digest-set size is never validated up front, so the failure surfaces only after the hardware was extended.
 - On `mr_extend()` failure no generation/`mr_read_generation` update, though the hardware might have changed; `mr_read_generation` duplicates `log->generation` and can wrap.
 - Needless complexity and dead code: INFO entries deep-copy immutable props; `mr_log_init` uses a temp array and a `UINT_MAX` check that is unreachable; one-member `event_batch`; size/type params of `extend_alloc` with one caller; `struct attestation_mr` wrapper; separately allocated log; heap-allocated `mr_change`; duplicated props/info encoders; duplicated validation; `xa_erase` before `xa_destroy`.

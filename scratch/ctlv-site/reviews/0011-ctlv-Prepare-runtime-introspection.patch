@@ -1,7 +1,3 @@
-Hi Jiri,
-
-Comments on 0011 inline.
-
 > From 92dd9be5b5f3a225a7ca1befbe49d5f60e6ee908 Mon Sep 17 00:00:00 2001
 > From: Jiri Pirko <jiri@nvidia.com>
 > Date: Thu, 15 Oct 2026 16:50:44 +0200
@@ -673,6 +669,3 @@ Summary of the most serious issues:
  - Inconsistent cursor encodings, `-EOPNOTSUPP` for an unknown op id, orphan
    comment, broken `guard()` formatting, and no documentation of the fragment
    resume semantics.
-
-Thanks,
-Reviewer
