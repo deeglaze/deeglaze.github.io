@@ -343,11 +343,70 @@
     return box;
   }
 
+  // Copies text to the clipboard; resolves on success. Falls back to
+  // execCommand where the async clipboard API is missing or refuses.
+  function copyText(text) {
+    const legacy = () => new Promise((resolve, reject) => {
+      const ta = el('textarea');
+      ta.value = text;
+      ta.style.position = 'fixed';
+      ta.style.opacity = '0';
+      document.body.appendChild(ta);
+      ta.select();
+      try {
+        if (document.execCommand('copy')) resolve();
+        else reject(new Error('copy refused'));
+      } catch (err) {
+        reject(err);
+      } finally {
+        ta.remove();
+      }
+    });
+    if (navigator.clipboard && window.isSecureContext)
+      return navigator.clipboard.writeText(text).catch(legacy);
+    return legacy();
+  }
+
+  // Shows a short-lived tooltip next to a link.
+  function tooltip(link, message) {
+    const old = link.parentNode.querySelector('.copied');
+    if (old) old.remove();
+    const tip = el('span', 'copied', message);
+    tip.setAttribute('role', 'status');
+    link.parentNode.appendChild(tip);
+    setTimeout(() => tip.remove(), 1000);
+  }
+
+  // Gives a reply box an <a> anchor and a pilcrow link that jumps to the
+  // anchor and copies its URL.
+  function addAnchor(box, n) {
+    const id = 'reply-' + n;
+    const anchor = el('a', 'anchor');
+    anchor.id = id;
+    const link = el('a', 'pilcrow', '\u00b6');
+    link.href = '#' + id;
+    link.title = 'Link to this reply';
+    link.setAttribute('aria-label', 'Link to reply ' + n);
+    link.addEventListener('click', e => {
+      e.preventDefault();
+      location.hash = id;
+      anchor.scrollIntoView();
+      copyText(location.href)
+        .then(() => tooltip(link, 'Copied to clipboard'))
+        .catch(() => tooltip(link, 'Copy failed'));
+    });
+    box.prepend(anchor);
+    box.appendChild(link);
+  }
+
   function render(text) {
     const root = document.createDocumentFragment();
+    let replies = 0;
     for (const b of parse(text)) {
       const node = b.quoted ? renderQuoted(b) : renderComment(b.lines);
-      if (node) root.appendChild(node);
+      if (!node) continue;
+      if (!b.quoted) addAnchor(node, ++replies);
+      root.appendChild(node);
     }
     return root;
   }
@@ -393,6 +452,9 @@
       .then(text => {
         raw.textContent = text;
         styled.appendChild(render(text));
+        // The browser scrolled before the replies existed.
+        const target = location.hash.length > 1 && document.getElementById(location.hash.slice(1));
+        if (target) target.scrollIntoView();
       })
       .catch(err => {
         const w = el('div', 'warn');
